@@ -142,6 +142,7 @@ pub struct Enhancers {
     data: PathBuf,
     model: Mutex<Option<Arc<Enhancer>>>,
     worker: Mutex<Option<PathBuf>>,
+    worker_cpu: std::sync::atomic::AtomicBool,
 }
 
 /// The scale as a copy's name says it: "2x" for a whole number, the name
@@ -231,6 +232,7 @@ impl Enhancers {
             data: data.to_path_buf(),
             model: Mutex::new(None),
             worker: Mutex::new(None),
+            worker_cpu: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -328,6 +330,7 @@ impl Enhancers {
                 &executable,
                 &self.data,
                 request,
+                &self.worker_cpu,
                 &job,
                 progress,
             );
@@ -403,6 +406,7 @@ impl Enhancers {
                 &executable,
                 &self.data,
                 request,
+                &self.worker_cpu,
                 &job,
                 progress,
             );

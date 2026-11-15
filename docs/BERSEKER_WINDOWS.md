@@ -33,14 +33,16 @@ só dessas etapas.
   `WGPU_DX12_COMPILER` continua explícito; o padrão é FXC do Windows.
 - Se a tentativa isolada de GPU morrer ou perder o dispositivo, há uma única
   nova tentativa em processo isolado com ONNX **CPU**, sem provider de GPU,
-  até quatro threads. Para diagnóstico, `BERSEKER_ENHANCE_DEVICE=cpu` evita abrir
+  até quatro threads. As operações seguintes usam CPU até reiniciar o aplicativo,
+  evitando novas tentativas na GPU que falhou. Para diagnóstico, `BERSEKER_ENHANCE_DEVICE=cpu` evita abrir
   GPU desde o início. `CONCAT_GPU=software` também impede a inferência em GPU.
   Não há troca silenciosa para outra API gráfica após uma escolha explícita.
 - No Windows o filho fica em um Job Object: encerra com o pai e tem limite de
   memória comprometida de até metade da RAM disponível, limitado a 4 GiB.
   Isso não é uma reserva de RAM nem um limite de VRAM do driver.
 - Resultados ficam em pasta temporária privada. Somente após saída normal e
-  resposta completa o pai publica a cópia, sem substituir um destino existente.
+  resposta completa o pai publica a cópia, sem substituir um destino existente
+  (no Windows, `MoveFileW` sem substituição, sem depender de hardlinks).
   Uma tentativa por CPU descarta antes qualquer resultado parcial de GPU.
   Arquivos de origem não são escritos. Mudança de tamanho/data na origem recusa
   o resultado. Cancelamento antes de iniciar o worker também é preservado.

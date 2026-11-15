@@ -232,11 +232,13 @@ fn execute(
     data: &Path,
     dir: &Directory,
     operation: Operation,
+    session_cpu: &std::sync::atomic::AtomicBool,
     job: &Job,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Reply, String> {
-    let cpu = std::env::var("BERSEKER_ENHANCE_DEVICE")
-        .is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"))
+    let cpu = session_cpu.load(Ordering::Acquire)
+        || std::env::var("BERSEKER_ENHANCE_DEVICE")
+            .is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"))
         || std::env::var("CONCAT_GPU").is_ok_and(|v| v.trim().eq_ignore_ascii_case("software"));
     let mut crashed = false;
     let first = execute_attempt(
@@ -252,8 +254,9 @@ fn execute(
     if first.is_ok() || !crashed || cpu || job.cancelled() {
         return first;
     }
+    session_cpu.store(true, Ordering::Release);
     log::warn!(
-        "enhance: isolated GPU failed; retrying once with ONNX CPU; {}",
+        "enhance: isolated GPU failed; using ONNX CPU for this session; {}",
         first.as_ref().err().unwrap()
     );
     // A child may have died after creating or even closing its output.
@@ -274,6 +277,7 @@ pub fn enhance(
     exe: &Path,
     data: &Path,
     request: &EnhanceRequest,
+    session_cpu: &std::sync::atomic::AtomicBool,
     job: &Job,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<PathBuf, String> {
@@ -297,6 +301,7 @@ pub fn enhance(
         data,
         &dir,
         Operation::Enhance(isolated.clone()),
+        session_cpu,
         job,
         progress,
     )?;
@@ -316,14 +321,35 @@ pub fn enhance(
         return Err("A origem mudou durante o aprimoramento; a cópia foi descartada.".into());
     }
     // Atomic publication without replacing an existing destination, including a source alias.
-    fs::hard_link(&isolated.target, &request.target).map_err(|e| e.to_string())?;
+    publish(&isolated.target, &request.target)?;
     Ok(request.target.clone())
 }
+fn publish(source: &Path, target: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+        // MoveFileW, unlike std::fs::rename/MoveFileEx(REPLACE_EXISTING),
+        // atomically refuses an existing destination. Same-volume staging.
+        if unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileW(source.as_ptr(), target.as_ptr())
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+    #[cfg(not(windows))]
+    fs::hard_link(source, target).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// The comparison preview shares the full job's native-crash boundary.
 pub fn preview(
     exe: &Path,
     data: &Path,
     request: &PreviewRequest,
+    session_cpu: &std::sync::atomic::AtomicBool,
     job: &Job,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Preview, String> {
@@ -333,6 +359,7 @@ pub fn preview(
         data,
         &dir,
         Operation::Preview(request.clone()),
+        session_cpu,
         job,
         progress,
     )?;
@@ -425,6 +452,19 @@ mod tests {
             .into()
     }
     #[test]
+    fn publication_never_replaces_an_existing_file() {
+        let root = tempfile::tempdir().unwrap();
+        let complete = root.path().join("complete.mp4");
+        let existing = root.path().join("existing.mp4");
+        fs::write(&complete, b"complete").unwrap();
+        fs::write(&existing, b"user file").unwrap();
+        assert!(publish(&complete, &existing).is_err());
+        assert_eq!(fs::read(&existing).unwrap(), b"user file");
+        let fresh = root.path().join("new.mp4");
+        publish(&complete, &fresh).unwrap();
+        assert_eq!(fs::read(&fresh).unwrap(), b"complete");
+    }
+    #[test]
     fn cancellation_before_worker_start_does_not_open_source_or_load_model() {
         let root = tempfile::tempdir().unwrap();
         let service = Enhancers::new(root.path());
@@ -485,6 +525,13 @@ mod tests {
         );
         assert_eq!(fs::read(&source).unwrap(), original);
         assert!(!service.is_busy());
+        assert!(
+            fs::read_dir(root.path().join("logs"))
+                .unwrap()
+                .any(|entry| fs::read_to_string(entry.unwrap().path())
+                    .unwrap()
+                    .contains("verified model"))
+        );
     }
     #[test]
     #[ignore = "requires BERSEKER_TEST_WORKER and CONCAT_ENHANCE_TEST_MODEL"]
@@ -573,7 +620,7 @@ mod tests {
             }));
         }
         let logs: Vec<_> = fs::read_dir(root.path().join("logs")).unwrap().collect();
-        assert_eq!(logs.len(), 4);
+        assert_eq!(logs.len(), 3);
         assert!(logs.iter().any(|p| {
             fs::read_to_string(p.as_ref().unwrap().path())
                 .unwrap()
