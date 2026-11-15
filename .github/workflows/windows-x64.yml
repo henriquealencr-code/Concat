@@ -1,6 +1,8 @@
 name: Windows x64
 
 on:
+  push:
+    branches: [work]
   workflow_dispatch:
 
 permissions:
