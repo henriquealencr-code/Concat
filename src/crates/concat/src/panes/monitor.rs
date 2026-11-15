@@ -404,7 +404,7 @@ impl MonitorPane {
             canvas: studio.project().active().video.canvas,
             nearest,
         };
-        if !studio.playing {
+        if !moving {
             self.cadence.report(studio.project().active().video.rate());
         }
         let monitor = studio.host.monitor.clone();

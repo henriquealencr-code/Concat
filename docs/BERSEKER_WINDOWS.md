@@ -33,7 +33,7 @@ só dessas etapas.
   `WGPU_DX12_COMPILER` continua explícito; o padrão é FXC do Windows.
 - Se a tentativa isolada de GPU morrer ou perder o dispositivo, há uma única
   nova tentativa em processo isolado com ONNX **CPU**, sem provider de GPU,
-  até quatro threads. As operações seguintes usam CPU até reiniciar o aplicativo,
+  até quatro threads e codificação por software (sem voltar ao driver no encoder). As operações seguintes usam CPU até reiniciar o aplicativo,
   evitando novas tentativas na GPU que falhou. Para diagnóstico, `BERSEKER_ENHANCE_DEVICE=cpu` evita abrir
   GPU desde o início. `CONCAT_GPU=software` também impede a inferência em GPU.
   Não há troca silenciosa para outra API gráfica após uma escolha explícita.

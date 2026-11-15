@@ -593,6 +593,7 @@ fn footage(
     let end = request.span.map(|(start, duration)| start + duration);
     let mut decoder =
         Decoder::open(&request.media_path, &options).map_err(|error| error.to_string())?;
+    log::info!("enhance: video encoder software_only={}", cpu_requested());
     let mut encoder = Encoder::create(
         &partial_video,
         width,
@@ -609,9 +610,9 @@ fn footage(
             bitrate_kbps: 0,
             ten_bit: false,
             color_range: concat_media::ColorRange::Limited,
-            hardware: true,
+            hardware: !cpu_requested(),
             threads: 2,
-            software_only: false,
+            software_only: cpu_requested(),
         },
     )
     .map_err(|error| error.to_string())?;
@@ -776,10 +777,13 @@ pub(crate) fn crop(frame: &concat_core::Frame, width: u32, height: u32) -> conca
 /// where it mattered. Each candidate is warmed on one window and timed on
 /// the next two, in the app as it is, and both times are logged. ONNX
 /// Runtime on the CPU is what is left when no GPU opens.
+fn cpu_requested() -> bool {
+    std::env::var("BERSEKER_ENHANCE_DEVICE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"))
+        || std::env::var("CONCAT_GPU").is_ok_and(|v| v.trim().eq_ignore_ascii_case("software"))
+}
+
 fn fastest(file: &Path) -> Result<Enhancer, String> {
-    let cpu = std::env::var("BERSEKER_ENHANCE_DEVICE")
-        .is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"))
-        || std::env::var("CONCAT_GPU").is_ok_and(|v| v.trim().eq_ignore_ascii_case("software"));
+    let cpu = cpu_requested();
     if cpu {
         log::info!("enhance: explicit CPU inference; no GPU instance will be opened");
     }
@@ -965,6 +969,16 @@ mod tests {
         }
         assert_eq!(count, 4);
         assert!(progressed);
+        if cpu_requested() && std::env::var_os("BERSEKER_TEST_WORKER").is_some() {
+            let text: String = std::fs::read_dir(dir.path().join("logs"))
+                .unwrap()
+                .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+                .collect();
+            assert!(text.contains("explicit CPU inference"));
+            assert!(text.contains("video encoder software_only=true"));
+            assert!(!text.contains("GPU adapter AdapterInfo"));
+        }
+
         assert_eq!(std::fs::read(source).unwrap(), original);
         assert!(!target.with_extension("part.mp4").exists());
         assert!(!service.is_busy());

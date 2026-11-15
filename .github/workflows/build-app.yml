@@ -1090,6 +1090,7 @@ jobs:
           $env:CONCAT_ENHANCE_TEST_MODEL = "$env:RUNNER_TEMP\concat-enhance-model\realesr-general-x4v3.onnx"
           cargo test --locked --manifest-path src/Cargo.toml -p concat-host --lib enhance_worker::tests::real_model_comparison_preview_crosses_the_process_boundary -- --ignored --exact --nocapture
           if ($LASTEXITCODE -ne 0) { throw "Packaged Enhance preview failed" }
+          $env:BERSEKER_ENHANCE_DEVICE = "cpu"
           cargo test --locked --manifest-path src/Cargo.toml -p concat-host --lib enhance::tests::a_real_video_is_enhanced_without_touching_the_source -- --ignored --exact --nocapture
           if ($LASTEXITCODE -ne 0) { throw "Packaged Enhance video failed" }
 
