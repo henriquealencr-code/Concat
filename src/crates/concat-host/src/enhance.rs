@@ -25,9 +25,8 @@
 //! few tiles, seconds - and says how long a tile took, which is what the
 //! window's estimate for the whole run is made of.
 //!
-//! Enhance only ever runs because the person asked, so a crash inside it
-//! does not come back on the next open and needs no tripwire; see
-//! [`crate::jobs::Tripwire`].
+//! GPU failures are reported as job errors. Copies are adopted only after
+//! success, leaving the source media and the project unchanged on failure.
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -266,6 +265,20 @@ impl Enhancers {
         if !self.installed() {
             crate::cutout::fetch(ModelId::Enhance, &file, cancel, progress)?;
         }
+        let spec = ModelId::Enhance.spec();
+        if std::fs::metadata(&file)
+            .map_err(|e| format!("enhance: model metadata: {e}"))?
+            .len()
+            != spec.bytes
+        {
+            return Err("enhance: the installed model has an invalid size; reinstall it from model settings".to_owned());
+        }
+        crate::models::verify(&file, spec.sha256)?;
+        log::info!(
+            "enhance: verified model {} ({} bytes)",
+            spec.file,
+            spec.bytes
+        );
         let enhancer = Arc::new(fastest(&file)?);
         *self.model.lock().map_err(|_| "model slot poisoned")? = Some(Arc::clone(&enhancer));
         Ok(enhancer)
@@ -279,11 +292,28 @@ impl Enhancers {
         request: &EnhanceRequest,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<PathBuf, String> {
+        let result = self.enhance_inner(request, progress);
+        if let Err(error) = &result {
+            log::error!("enhance: job failed: {error}");
+            // A failed GPU instance must not poison every subsequent retry.
+            if let Ok(mut model) = self.model.lock() {
+                *model = None;
+            }
+        }
+        result
+    }
+
+    fn enhance_inner(
+        &self,
+        request: &EnhanceRequest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<PathBuf, String> {
         if request.target.is_file() {
             return Ok(request.target.clone());
         }
         let job = self.gate.begin("enhance")?;
         let cancel = job.cancel_handle();
+        preflight(&request.media_path, request.scale)?;
         let enhancer = self.loaded(&cancel, progress)?;
         if let Some(folder) = request.target.parent() {
             std::fs::create_dir_all(folder)
@@ -291,7 +321,7 @@ impl Enhancers {
         }
         progress(Progress::Analysing(0.0));
         let result = if request.still {
-            still(&enhancer, request)
+            still(&enhancer, request, &job)
         } else {
             footage(&enhancer, request, &job, progress)
         };
@@ -309,8 +339,24 @@ impl Enhancers {
         request: &PreviewRequest,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<Preview, String> {
+        let result = self.preview_inner(request, progress);
+        if let Err(error) = &result {
+            log::error!("enhance: preview failed: {error}");
+            if let Ok(mut model) = self.model.lock() {
+                *model = None;
+            }
+        }
+        result
+    }
+
+    fn preview_inner(
+        &self,
+        request: &PreviewRequest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<Preview, String> {
         let job = self.gate.begin("enhance")?;
         let cancel = job.cancel_handle();
+        preflight(&request.media_path, request.scale)?;
         let enhancer = self.loaded(&cancel, progress)?;
         if job.cancelled() {
             return Err("enhance cancelled".to_owned());
@@ -334,9 +380,68 @@ impl Enhancers {
     }
 }
 
+/// Refuse oversized or memory-starved jobs before loading a model or creating output.
+fn preflight(path: &str, scale: f32) -> Result<(), String> {
+    if !scale.is_finite() || !(1.0..=4.0).contains(&scale) {
+        return Err("enhance: invalid scale".to_owned());
+    }
+    let info = concat_media::probe(path).map_err(|e| format!("enhance: {e}"))?;
+    let video = info.video.ok_or("enhance: no video stream")?;
+    let (width, height) = vision::size_at(video.width, video.height, scale);
+    if video.width == 0
+        || video.height == 0
+        || video.width > concat_core::frame::MAX_SIDE
+        || video.height > concat_core::frame::MAX_SIDE
+        || width.max(height) > vision::MAX_LONG
+        || width.min(height) > vision::MAX_SHORT
+    {
+        return Err("enhance: the requested picture exceeds the supported output size".to_owned());
+    }
+    check_memory(
+        video.width,
+        video.height,
+        width,
+        height,
+        crate::memory::available(),
+    )
+}
+
+fn check_memory(
+    sw: u32,
+    sh: u32,
+    width: u32,
+    height: u32,
+    available: Option<u64>,
+) -> Result<(), String> {
+    // Output sums, RGBA copies, bicubic scratch, decoder history and model
+    // workspace. A conservative admission check, not a promise by the OS.
+    let estimated = u64::from(width) * u64::from(height) * 32
+        + u64::from(width) * u64::from(sh) * 16
+        + u64::from(sw) * u64::from(sh) * 12
+        + 256 * 1024 * 1024;
+    log::debug!(
+        "enhance: {sw}x{sh} -> {width}x{height}; estimated RAM {} MiB, available {:?} MiB",
+        estimated / 1_048_576,
+        available.map(|n| n / 1_048_576)
+    );
+    let budget = available.map_or(1024 * 1024 * 1024, |n| n / 4 * 3);
+    if estimated > budget {
+        return Err(format!(
+            "enhance: insufficient available RAM (estimated {} MiB; budget {} MiB); close other jobs or choose a smaller output",
+            estimated / 1_048_576,
+            budget / 1_048_576
+        ));
+    }
+    Ok(())
+}
+
 /// One frame through the model, as a PNG: lossless, since the point was
 /// the detail.
-fn still(enhancer: &Enhancer, request: &EnhanceRequest) -> Result<(), String> {
+fn still(
+    enhancer: &Enhancer,
+    request: &EnhanceRequest,
+    job: &crate::jobs::Job,
+) -> Result<(), String> {
     let mut decoder = Decoder::open(&request.media_path, &DecodeOptions::default().in_software())
         .map_err(|error| error.to_string())?;
     let frame = decoder
@@ -345,10 +450,13 @@ fn still(enhancer: &Enhancer, request: &EnhanceRequest) -> Result<(), String> {
         .ok_or_else(|| format!("{} holds no picture", request.media_path))?;
     let (width, height) = vision::size_at(frame.width(), frame.height(), request.scale);
     let enhanced = vision::mix(
-        enhancer.enhance(&frame, width, height)?,
+        enhancer.enhance_cancellable(&frame, width, height, &|| job.cancelled())?,
         &frame,
         request.strength,
     );
+    if job.cancelled() {
+        return Err("enhance cancelled".to_owned());
+    }
     let partial = request.target.with_extension("part.png");
     let written = (|| {
         let file = std::fs::File::create(&partial).map_err(|error| error.to_string())?;
@@ -474,7 +582,15 @@ fn footage(
                     answer.clone()
                 }
                 _ => {
-                    let model = enhancer.enhance(&frame, width, height)?;
+                    check_memory(
+                        frame.width(),
+                        frame.height(),
+                        width,
+                        height,
+                        crate::memory::available(),
+                    )?;
+                    let model =
+                        enhancer.enhance_cancellable(&frame, width, height, &|| job.cancelled())?;
                     lap(1, &mut t);
                     let enhanced = vision::mix(model, &frame, request.strength);
                     lap(2, &mut t);
@@ -701,6 +817,151 @@ impl vision::WindowRunner for GpuWindows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the verified model in CONCAT_ENHANCE_TEST_MODEL and an H.264 encoder"]
+    fn a_real_video_is_enhanced_without_touching_the_source() {
+        let model = std::env::var_os("CONCAT_ENHANCE_TEST_MODEL").expect("model path");
+        let dir = tempfile::tempdir().unwrap();
+        let installed = models::model_file(dir.path(), ModelId::Enhance);
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::copy(model, installed).unwrap();
+        let source = dir.path().join("source.mp4");
+        {
+            let mut writer = Encoder::create(
+                &source,
+                16,
+                16,
+                concat_core::time::FrameRate::from_int(24),
+                &EncodeOptions {
+                    codec: VideoCodec::Mpeg4,
+                    hardware: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut frame = Frame::black(16, 16);
+            for pixel in frame.pixels_mut().chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[180, 60, 100, 255]);
+            }
+            for _ in 0..4 {
+                writer.write_frame(&frame).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let original = std::fs::read(&source).unwrap();
+        let target = dir.path().join("enhanced.mp4");
+        let service = Enhancers::new(dir.path());
+        let mut progressed = false;
+        let made = service
+            .enhance(
+                &EnhanceRequest {
+                    media_path: source.to_string_lossy().into_owned(),
+                    still: false,
+                    scale: 2.0,
+                    strength: DEFAULT_STRENGTH,
+                    target: target.clone(),
+                    span: None,
+                },
+                &mut |p| {
+                    if let Progress::Analysing(f) = p {
+                        progressed |= f > 0.0;
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(made, target);
+        let mut decoder = Decoder::open(&target, &DecodeOptions::default().in_software()).unwrap();
+        let mut count = 0;
+        while let Some(frame) = decoder.next_frame().unwrap() {
+            assert_eq!((frame.width(), frame.height()), (32, 32));
+            assert!(frame.pixel(16, 16).unwrap()[0] > 100);
+            count += 1;
+        }
+        assert_eq!(count, 4);
+        assert!(progressed);
+        assert_eq!(std::fs::read(source).unwrap(), original);
+        assert!(!target.with_extension("part.mp4").exists());
+        assert!(!service.is_busy());
+    }
+
+    #[test]
+    fn an_invalid_installed_model_is_rejected_without_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = models::model_file(dir.path(), ModelId::Enhance);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // Correct size is not evidence of integrity.
+        std::fs::write(&file, vec![0u8; ModelId::Enhance.spec().bytes as usize]).unwrap();
+        let service = Enhancers::new(dir.path());
+        assert!(service.installed());
+        let error = service
+            .loaded(&AtomicBool::new(false), &mut |_| {})
+            .err()
+            .expect("refused");
+        assert!(error.contains("sha256"), "{error}");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().len(),
+            ModelId::Enhance.spec().bytes
+        );
+    }
+
+    #[test]
+    fn a_failed_enhancement_preserves_source_project_and_existing_cache() {
+        struct Failed;
+        impl vision::WindowRunner for Failed {
+            fn run(&mut self, _: Vec<f32>) -> Result<Vec<f32>, String> {
+                Err("injected GPU failure".to_owned())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("original.png");
+        {
+            let file = std::fs::File::create(&source).unwrap();
+            let mut encoder = png::Encoder::new(file, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255; 16])
+                .unwrap();
+        }
+        let original = std::fs::read(&source).unwrap();
+        let project = dir.path().join("concat.json");
+        std::fs::write(&project, b"project sentinel").unwrap();
+        let cache = dir.path().join("existing.mp4");
+        std::fs::write(&cache, b"existing cache sentinel").unwrap();
+        let service = Enhancers::new(dir.path());
+        *service.model.lock().unwrap() = Some(Arc::new(Enhancer::with(Box::new(Failed))));
+        let target = dir.path().join("enhanced.png");
+        let error = service
+            .enhance(
+                &EnhanceRequest {
+                    media_path: source.to_string_lossy().into_owned(),
+                    still: true,
+                    scale: 2.0,
+                    strength: 1.0,
+                    target: target.clone(),
+                    span: None,
+                },
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(error.contains("injected GPU failure"), "{error}");
+        assert_eq!(std::fs::read(source).unwrap(), original);
+        assert_eq!(std::fs::read(project).unwrap(), b"project sentinel");
+        assert_eq!(std::fs::read(cache).unwrap(), b"existing cache sentinel");
+        assert!(!target.exists());
+        assert!(!target.with_extension("part.png").exists());
+        assert!(!service.is_busy());
+    }
+
+    #[test]
+    fn memory_pressure_refuses_work_before_allocation() {
+        assert!(check_memory(1920, 1080, 3840, 2160, Some(128 * 1024 * 1024)).is_err());
+        assert!(check_memory(1920, 1080, 3840, 2160, Some(4 * 1024 * 1024 * 1024)).is_ok());
+        assert!(check_memory(8192, 8192, 3840, 2160, None).is_err());
+    }
 
     /// A span of a file enhanced on its own: the copy is the span long, its
     /// picture starts at the span's start, and its sound is there beside

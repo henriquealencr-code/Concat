@@ -239,6 +239,7 @@ pub struct Upscaler {
     scale: u32,
     /// Activations and weights are stored as f16.
     half: bool,
+    fault: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// `values` as the shader stores them: little-endian f32, or f16.
@@ -258,12 +259,24 @@ fn groups(channels: usize) -> usize {
     channels.div_ceil(4)
 }
 
+// Match the compositor: Auto can load an unrelated dxcompiler.dll from
+// PATH on Windows and fault natively before Rust can report an error.
+fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    let mut descriptor = wgpu::InstanceDescriptor {
+        memory_budget_thresholds: crate::gpu::memory_budget(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    };
+    descriptor.backend_options.dx12.shader_compiler =
+        wgpu::Dx12Compiler::from_env().unwrap_or(wgpu::Dx12Compiler::Fxc);
+    descriptor
+}
+
 impl Upscaler {
     /// The network `layers`, enlarging `scale` times, for square windows
     /// `side` pixels across, on the first GPU that opens - `None` where
     /// there is none, and the caller runs the model the slow way.
     pub fn new(layers: &[ConvLayer], scale: u32, side: u32) -> Option<Upscaler> {
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(instance_descriptor());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
@@ -272,6 +285,11 @@ impl Upscaler {
         if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
             return None;
         }
+        log::info!(
+            "enhance: GPU adapter {:?}, limits {:?}",
+            adapter.get_info(),
+            adapter.limits()
+        );
         let half = adapter.features().contains(wgpu::Features::SHADER_F16);
         let (device, queue) = pollster::block_on(
             adapter.request_device(&wgpu::DeviceDescriptor {
@@ -304,9 +322,48 @@ impl Upscaler {
         // and the next layer reads the padding as inputs it weighs by zero.
         let padded_groups = |channels: usize| groups(channels).div_ceil(4) * 4;
         let widest = layers.iter().map(|l| padded_groups(l.out_channels)).max()?;
-        let pixels = (side * side) as u64;
+        if side == 0 || scale == 0 || scale > 4 {
+            return None;
+        }
+        let pixels = u64::from(side).checked_mul(u64::from(side))?;
         // A vec4 of the stored type: sixteen bytes of f32, eight of f16.
         let vec4 = if half { 8u64 } else { 16u64 };
+        let activation_size = pixels.checked_mul(widest as u64)?.checked_mul(vec4)?;
+        let planes_size = pixels
+            .checked_mul(u64::from(scale) * u64::from(scale))?
+            .checked_mul(12)?;
+        let limits = device.limits();
+        if [activation_size, planes_size, pixels * vec4]
+            .into_iter()
+            .any(|bytes| {
+                bytes > limits.max_buffer_size || bytes > limits.max_storage_buffer_binding_size
+            })
+        {
+            log::warn!("enhance: GPU buffers exceed the device limits; use the CPU");
+            return None;
+        }
+        let fault = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let errors = std::sync::Arc::clone(&fault);
+        device.on_uncaptured_error(std::sync::Arc::new(move |error: wgpu::Error| {
+            log::error!("enhance: GPU error: {error}");
+            if let Ok(mut reason) = errors.lock() {
+                *reason = Some(format!("enhance: GPU error: {error}"));
+            }
+        }));
+        let errors = std::sync::Arc::clone(&fault);
+        device.set_device_lost_callback(move |reason, message| {
+            log::error!("enhance: GPU device lost: {reason:?}: {message}");
+            if let Ok(mut kept) = errors.lock() {
+                *kept = Some(format!("enhance: GPU device lost: {reason:?}: {message}"));
+            }
+        });
+        let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        log::info!(
+            "enhance: GPU activation buffers {} MiB, output/readback {} MiB",
+            activation_size * 2 / 1_048_576,
+            planes_size * 2 / 1_048_576
+        );
         let activation = |label| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -323,7 +380,6 @@ impl Upscaler {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let planes_size = 3 * pixels * u64::from(scale * scale) * 4;
         let planes = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("upscaler planes"),
             size: planes_size,
@@ -523,7 +579,17 @@ impl Upscaler {
                 },
             ],
         });
+        let refused = pollster::block_on(validation.pop());
+        let exhausted = pollster::block_on(memory.pop());
+        if let Some(error) = refused.or(exhausted) {
+            log::error!("enhance: GPU initialisation failed: {error}");
+            return None;
+        }
+        if fault.lock().ok()?.is_some() {
+            return None;
+        }
         Some(Upscaler {
+            fault,
             device,
             queue,
             conv,
@@ -553,6 +619,14 @@ impl Upscaler {
     /// values `0..=1`, in; three planes `scale` times the side out - the
     /// ONNX model's input and answer, value for value.
     pub fn run(&self, planes: &[f32]) -> Result<Vec<f32>, String> {
+        if let Some(error) = self
+            .fault
+            .lock()
+            .map_err(|_| "enhance: GPU error state poisoned")?
+            .clone()
+        {
+            return Err(error);
+        }
         let side = self.side as usize;
         let area = side * side;
         if planes.len() != 3 * area {
@@ -600,10 +674,13 @@ impl Upscaler {
             let _ = sent.send(result);
         });
         self.device
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(30)),
+            })
             .map_err(|error| format!("upscaler: the device did not finish: {error}"))?;
         mapped
-            .recv()
+            .recv_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| "upscaler: the device never answered".to_owned())?
             .map_err(|error| format!("upscaler: the answer would not map: {error}"))?;
         let answer = {
@@ -615,6 +692,14 @@ impl Upscaler {
                 .collect()
         };
         self.staging.unmap();
+        if let Some(error) = self
+            .fault
+            .lock()
+            .map_err(|_| "enhance: GPU error state poisoned")?
+            .clone()
+        {
+            return Err(error);
+        }
         Ok(answer)
     }
 }
@@ -623,6 +708,34 @@ impl Upscaler {
 mod tests {
     use super::*;
     use concat_vision::compact::{CompactNet, Conv};
+
+    #[test]
+    fn a_gpu_validation_error_is_returned_instead_of_panicking() {
+        let instance = wgpu::Instance::new(instance_descriptor());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
+            .expect("Vulkan software adapter required");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).expect("device");
+        let layer = ConvLayer {
+            in_channels: 3,
+            out_channels: 3,
+            weight: vec![0.0; 81],
+            bias: vec![0.0; 3],
+            prelu: None,
+        };
+        let gpu = Upscaler::on(device, queue, &[layer], 1, 4, false).expect("small network");
+        // Deliberately trigger the handler wgpu normally implements with a panic.
+        let _invalid = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("injected invalid allocation"),
+            size: gpu.device.limits().max_buffer_size + 1,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let error = gpu
+            .run(&vec![0.0; 3 * 4 * 4])
+            .expect_err("must report GPU failure");
+        assert!(error.contains("GPU error"), "{error}");
+    }
 
     /// A small network of made-up weights, run on the GPU and on the CPU
     /// reference: the two agree to rounding, edges and shuffle included.

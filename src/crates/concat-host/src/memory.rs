@@ -106,3 +106,44 @@ mod tests {
         assert!(total >= 512 * 1024 * 1024, "{total} bytes");
     }
 }
+
+/// Memory currently available for new work, rather than the machine's total.
+/// A fresh reading is needed before a large job; cached totals miss pressure.
+pub fn available() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        // SAFETY: the initialized structure has the length required by Windows.
+        unsafe {
+            let mut status: MEMORYSTATUSEX = std::mem::zeroed();
+            status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+            (GlobalMemoryStatusEx(&mut status) != 0).then_some(status.ullAvailPhys)
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let physical = text.lines().find_map(|line| {
+            let rest = line.strip_prefix("MemAvailable:")?;
+            rest.split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()?
+                .checked_mul(1024)
+        })?;
+        let limited = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .zip(
+                std::fs::read_to_string("/sys/fs/cgroup/memory.current")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok()),
+            )
+            .map(|(max, used)| max.saturating_sub(used));
+        Some(limited.map_or(physical, |limit| physical.min(limit)))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
+    }
+}

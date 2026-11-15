@@ -13,8 +13,7 @@
 //! is a pure function here, tested without a model; only [`Enhancer`]
 //! needs one, and the `infer` feature that brings the runtime.
 //!
-//! Four times is more than a clip wants. Past 2K - 2560 by 1440, what a
-//! consumer machine plays and a phone or laptop screen shows - enlarging
+//! Four times is more than a clip wants. Past 4K - 3840 by 2160 - enlarging
 //! buys time and gigabytes and no picture anybody sees, so nothing is made
 //! larger than [`MAX_LONG`] by [`MAX_SHORT`]. Inside that the size is the
 //! person's, any scale in hundredths - see [`scale_of`] - and Auto is
@@ -41,12 +40,11 @@ pub const CORE: u32 = 256;
 pub const PAD: u32 = 16;
 /// The square the model actually reads: the tile and its margin.
 pub const WINDOW: u32 = CORE + 2 * PAD;
-/// The longest side Enhance will make: 2K's. A picture already past it is
-/// restored at its own size rather than enlarged.
-pub const MAX_LONG: u32 = 2560;
-/// The shorter side's limit, 2K's 1440, so an upright phone video is held
-/// to 1440 across as a landscape one is held to 1440 high.
-pub const MAX_SHORT: u32 = 1440;
+/// The longest side Enhance will make: UHD 4K.
+pub const MAX_LONG: u32 = 3840;
+/// The shorter side's limit, 4K's 2160, so an upright phone video is held
+/// to 2160 across as a landscape one is held to 2160 high.
+pub const MAX_SHORT: u32 = 2160;
 /// The smallest step a scale is asked in, so a copy made at one scale is
 /// found again rather than made twice for a slider's rounding.
 pub const SCALE_STEP: f32 = 0.05;
@@ -92,10 +90,10 @@ fn on_grid(scale: f32) -> f32 {
     ((scale / SCALE_STEP) + 1e-3).floor() * SCALE_STEP
 }
 
-/// The most a `width` by `height` picture may be enlarged: as far as 2K
-/// on both sides allows, exactly - 1080p's is 1440p's four thirds, off
-/// the grid - never past the model's own four times, and never under
-/// once: a picture already past 2K is restored at its own size.
+/// The most a `width` by `height` picture may be enlarged: as far as 4K
+/// on both sides allows, exactly - 1440p's maximum is 1.5 - never
+/// past the model's own four times, and never under
+/// once: a picture already past 4K is restored at its own size.
 pub fn max_scale(width: u32, height: u32) -> f32 {
     let (long, short) = (width.max(height), width.min(height));
     if long == 0 || short == 0 {
@@ -107,7 +105,7 @@ pub fn max_scale(width: u32, height: u32) -> f32 {
     most.max(1.0)
 }
 
-/// Auto: twice, or as much as 2K leaves when that is less.
+/// Auto: twice, or as much as 4K leaves when that is less.
 pub fn auto_scale(width: u32, height: u32) -> f32 {
     max_scale(width, height).min(2.0)
 }
@@ -541,20 +539,36 @@ impl Enhancer {
         Ok((out, times))
     }
 
-    /// `frame` restored and enlarged to exactly `width` by `height`, no
-    /// larger than the model's four times: its answer, averaged down to
-    /// size by [`area_resize`].
+    /// Restores directly into the requested output size, without allocating
+    /// a full four-times intermediate frame.
     pub fn enhance(&self, frame: &Frame, width: u32, height: u32) -> Result<Frame, String> {
-        let large = self.upscale(frame)?;
-        Ok(area_resize(
-            &large,
-            width.min(large.width()),
-            height.min(large.height()),
-        ))
+        self.enhance_cancellable(frame, width, height, &|| false)
     }
 
-    /// [`Enhancer::enhance`] for `region` of `frame` alone at `scale`, with
-    /// the time each of its tiles took; see [`Enhancer::upscale_region`].
+    /// Like [`Self::enhance`], checking cancellation between model tiles.
+    pub fn enhance_cancellable(
+        &self,
+        frame: &Frame,
+        width: u32,
+        height: u32,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Frame, String> {
+        self.render_region(
+            frame,
+            Tile {
+                x: 0,
+                y: 0,
+                width: frame.width(),
+                height: frame.height(),
+            },
+            width,
+            height,
+            cancelled,
+        )
+        .map(|(frame, _)| frame)
+    }
+
+    /// Restores a preview region without constructing a full four-times image.
     pub fn enhance_region(
         &self,
         frame: &Frame,
@@ -562,16 +576,288 @@ impl Enhancer {
         scale: f32,
     ) -> Result<(Frame, Vec<std::time::Duration>), String> {
         let scale = scale.clamp(1.0, SCALE as f32);
-        let (large, times) = self.upscale_region(frame, region)?;
-        let width = ((region.width as f32 * scale).round() as u32).clamp(1, large.width());
-        let height = ((region.height as f32 * scale).round() as u32).clamp(1, large.height());
-        Ok((area_resize(&large, width, height), times))
+        self.render_region(
+            frame,
+            region,
+            (region.width as f32 * scale).round() as u32,
+            (region.height as f32 * scale).round() as u32,
+            &|| false,
+        )
+    }
+
+    fn render_region(
+        &self,
+        frame: &Frame,
+        region: Tile,
+        width: u32,
+        height: u32,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(Frame, Vec<std::time::Duration>), String> {
+        if region.width == 0
+            || region.height == 0
+            || region
+                .x
+                .checked_add(region.width)
+                .is_none_or(|x| x > frame.width())
+            || region
+                .y
+                .checked_add(region.height)
+                .is_none_or(|y| y > frame.height())
+            || width == 0
+            || height == 0
+            || width > concat_core::frame::MAX_SIDE
+            || height > concat_core::frame::MAX_SIDE
+            || width > region.width.saturating_mul(SCALE)
+            || height > region.height.saturating_mul(SCALE)
+        {
+            return Err("enhance: invalid source region or output dimensions".to_owned());
+        }
+        // Three float sums per output pixel, one RGBA output and one model
+        // window. Memory follows the requested size, not input area * 16.
+        let count = width as usize * height as usize;
+        let mut sums = Vec::new();
+        sums.try_reserve_exact(count * 3)
+            .map_err(|_| "enhance: insufficient RAM for the requested output")?;
+        sums.resize(count * 3, 0f32);
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(count * 4)
+            .map_err(|_| "enhance: insufficient RAM for the requested output")?;
+        let full_w = region
+            .width
+            .checked_mul(SCALE)
+            .ok_or("enhance: width overflow")?;
+        let full_h = region
+            .height
+            .checked_mul(SCALE)
+            .ok_or("enhance: height overflow")?;
+        let xs = spans(full_w, width);
+        let ys = spans(full_h, height);
+        let mut model = self.model.lock().map_err(|_| "enhance: model poisoned")?;
+        let mut times = Vec::new();
+        let side = (WINDOW * SCALE) as usize;
+        for tile in tiles(region.width, region.height) {
+            if cancelled() {
+                return Err("enhance cancelled".to_owned());
+            }
+            let placed = Tile {
+                x: region.x + tile.x,
+                y: region.y + tile.y,
+                ..tile
+            };
+            let started = std::time::Instant::now();
+            let answer = model.run(window_planes(frame, placed))?;
+            times.push(started.elapsed());
+            if answer.len() != 3 * side * side || answer.iter().any(|x| !x.is_finite()) {
+                return Err("enhance: the model returned an invalid tile".to_owned());
+            }
+            let (left, top) = ((tile.x * SCALE) as usize, (tile.y * SCALE) as usize);
+            let (right, bottom) = (
+                left + (tile.width * SCALE) as usize,
+                top + (tile.height * SCALE) as usize,
+            );
+            let first_x = (left as u64 * u64::from(width) / u64::from(full_w)) as usize;
+            let last_x = (right as u64 * u64::from(width)).div_ceil(u64::from(full_w)) as usize;
+            let first_y = (top as u64 * u64::from(height) / u64::from(full_h)) as usize;
+            let last_y = (bottom as u64 * u64::from(height)).div_ceil(u64::from(full_h)) as usize;
+            for (y, yt) in ys.iter().enumerate().take(last_y).skip(first_y) {
+                for (x, xt) in xs.iter().enumerate().take(last_x).skip(first_x) {
+                    for &(sy, wy) in yt {
+                        if sy < top || sy >= bottom {
+                            continue;
+                        }
+                        for &(sx, wx) in xt {
+                            if sx < left || sx >= right {
+                                continue;
+                            }
+                            let at = (sy - top + (PAD * SCALE) as usize) * side + sx - left
+                                + (PAD * SCALE) as usize;
+                            for c in 0..3 {
+                                // Match the old paste-then-area-resize quantisation.
+                                let value = (answer[c * side * side + at].clamp(0.0, 1.0) * 255.0
+                                    + 0.5) as u8;
+                                sums[(y * width as usize + x) * 3 + c] +=
+                                    f32::from(value) * wx * wy;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if cancelled() {
+            return Err("enhance cancelled".to_owned());
+        }
+        for rgb in sums.chunks_exact(3) {
+            pixels.extend(rgb.iter().map(|v| (v + 0.5).clamp(0.0, 255.0) as u8));
+            pixels.push(255);
+        }
+        let out = Frame::from_rgba(width, height, pixels)
+            .ok_or("enhance: output dimensions do not match pixels")?;
+        Ok((out, times))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "infer")]
+    #[test]
+    #[ignore = "requires a verified Real-ESRGAN file in CONCAT_ENHANCE_TEST_MODEL"]
+    fn a_real_model_restores_a_frame() {
+        let file = std::env::var_os("CONCAT_ENHANCE_TEST_MODEL").expect("model path");
+        let enhancer = Enhancer::load(std::path::Path::new(&file)).expect("loads");
+        let frame = picture(8, 6, |x, y| [(x * 29) as u8, (y * 41) as u8, 80, 255]);
+        let out = enhancer
+            .enhance(&frame, 16, 12)
+            .expect("inference succeeds");
+        assert_eq!((out.width(), out.height()), (16, 12));
+        assert!(out.pixels().chunks_exact(4).all(|p| p[3] == 255));
+        assert!(out.pixels().chunks_exact(4).any(|p| p[0] > 20));
+    }
+
+    #[cfg(feature = "infer")]
+    #[test]
+    #[ignore = "requires a verified Real-ESRGAN file; runs a full 1080p to UHD frame"]
+    fn a_real_model_outputs_3840_by_2160() {
+        let file = std::env::var_os("CONCAT_ENHANCE_TEST_MODEL").expect("model path");
+        let enhancer = Enhancer::load(std::path::Path::new(&file)).expect("loads");
+        let frame = picture(1920, 1080, |x, y| {
+            [(x % 251) as u8, (y % 251) as u8, 80, 255]
+        });
+        let out = enhancer
+            .enhance(&frame, 3840, 2160)
+            .expect("UHD inference succeeds");
+        assert_eq!((out.width(), out.height()), (3840, 2160));
+        assert!(out.pixels().chunks_exact(4).all(|p| p[3] == 255));
+        assert!(out.pixels().chunks_exact(4).any(|p| p[0] > 20));
+    }
+
+    struct Repeat;
+    impl WindowRunner for Repeat {
+        fn run(&mut self, input: Vec<f32>) -> Result<Vec<f32>, String> {
+            let side = WINDOW as usize;
+            let big = side * SCALE as usize;
+            Ok((0..3 * big * big)
+                .map(|i| {
+                    let c = i / (big * big);
+                    let x = i % big / SCALE as usize;
+                    let y = i % (big * big) / big / SCALE as usize;
+                    input[(c * side + y) * side + x]
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn tiled_output_matches_full_intermediate_across_fractional_tile_edges() {
+        let enhancer = Enhancer::with(Box::new(Repeat));
+        let frame = picture(271, 7, |x, y| [(x % 251) as u8, (y * 31) as u8, 73, 255]);
+        let region = Tile {
+            x: 3,
+            y: 1,
+            width: 263,
+            height: 5,
+        };
+        let large = enhancer.upscale_region(&frame, region).unwrap().0;
+        for (w, h) in [(263, 5), (351, 7), (526, 10), (1052, 20)] {
+            let want = area_resize(&large, w, h);
+            let got = enhancer
+                .render_region(&frame, region, w, h, &|| false)
+                .unwrap()
+                .0;
+            assert_eq!((got.width(), got.height()), (w, h));
+            assert!(
+                got.pixels()
+                    .iter()
+                    .zip(want.pixels())
+                    .all(|(a, b)| a.abs_diff(*b) <= 1),
+                "{w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_or_invalid_jobs_never_run_the_model() {
+        struct Refuse;
+        impl WindowRunner for Refuse {
+            fn run(&mut self, _: Vec<f32>) -> Result<Vec<f32>, String> {
+                panic!("must not run");
+            }
+        }
+        let enhancer = Enhancer::with(Box::new(Refuse));
+        let frame = Frame::black(2, 2);
+        assert!(
+            enhancer
+                .enhance_cancellable(&frame, 4, 4, &|| true)
+                .unwrap_err()
+                .contains("cancelled")
+        );
+        assert!(enhancer.enhance(&frame, 0, 2).is_err());
+        assert!(enhancer.enhance(&frame, u32::MAX, 2).is_err());
+        assert!(
+            enhancer
+                .enhance_region(
+                    &frame,
+                    Tile {
+                        x: 2,
+                        y: 0,
+                        width: 1,
+                        height: 1
+                    },
+                    1.0
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cancellation_stops_before_the_next_tile() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Once(Arc<AtomicUsize>);
+        impl WindowRunner for Once {
+            fn run(&mut self, _: Vec<f32>) -> Result<Vec<f32>, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![0.5; (3 * WINDOW * WINDOW * SCALE * SCALE) as usize])
+            }
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let enhancer = Enhancer::with(Box::new(Once(Arc::clone(&count))));
+        let frame = Frame::black(CORE + 1, 1);
+        let error = enhancer
+            .enhance_cancellable(&frame, (CORE + 1) * 2, 2, &|| {
+                count.load(Ordering::SeqCst) > 0
+            })
+            .unwrap_err();
+        assert!(error.contains("cancelled"));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn model_failures_and_non_finite_answers_are_errors() {
+        struct Bad(bool);
+        impl WindowRunner for Bad {
+            fn run(&mut self, _: Vec<f32>) -> Result<Vec<f32>, String> {
+                if self.0 {
+                    Err("injected device loss".to_owned())
+                } else {
+                    Ok(vec![
+                        f32::NAN;
+                        (3 * WINDOW * WINDOW * SCALE * SCALE) as usize
+                    ])
+                }
+            }
+        }
+        for fail in [true, false] {
+            let error = Enhancer::with(Box::new(Bad(fail)))
+                .enhance(&Frame::black(1, 1), 2, 2)
+                .unwrap_err();
+            assert!(error.contains(if fail { "device loss" } else { "invalid tile" }));
+        }
+    }
 
     fn picture(width: u32, height: u32, at: impl Fn(u32, u32) -> [u8; 4]) -> Frame {
         let mut pixels = Vec::with_capacity((width * height) as usize * BYTES_PER_PIXEL);
@@ -626,19 +912,19 @@ mod tests {
     }
 
     #[test]
-    fn auto_is_twice_unless_that_passes_2k() {
+    fn auto_is_twice_unless_that_passes_4k() {
         assert_eq!(auto_scale(1280, 720), 2.0);
         assert_eq!(auto_scale(720, 1280), 2.0);
         assert_eq!(auto_scale(640, 480), 2.0);
-        // 1080p can only go to 1440p: four thirds, exactly.
-        assert_eq!(size_at(1920, 1080, auto_scale(1920, 1080)), (2560, 1440));
-        assert_eq!(auto_scale(2560, 1440), 1.0);
+        // 1080p doubles to 4K; a 1440p input reaches the exact cap.
+        assert_eq!(size_at(1920, 1080, auto_scale(1920, 1080)), (3840, 2160));
+        assert_eq!(auto_scale(2560, 1440), 1.5);
         assert_eq!(auto_scale(3840, 2160), 1.0);
         assert_eq!(auto_scale(0, 0), 2.0);
     }
 
     #[test]
-    fn nothing_comes_out_past_2k() {
+    fn nothing_comes_out_past_4k() {
         for (w, h) in [
             (640, 360),
             (854, 480),

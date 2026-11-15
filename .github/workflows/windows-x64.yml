@@ -1,0 +1,14 @@
+name: Windows x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    uses: ./.github/workflows/build-app.yml
+    with:
+      windows_only: true
+    secrets: inherit
