@@ -532,9 +532,12 @@ jobs:
               log.seek(0, 2)
               size = log.tell()
               log.seek(max(0, size - 12000))
-              tail = log.read().decode('utf-8', errors='replace')
-          message = tail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-          print('::error title=Editing regression diagnostics::' + message)
+              tail = log.read()
+          blocks = [tail[index:index + 1500] for index in range(0, len(tail), 1500)]
+          for index, block in enumerate(blocks, 1):
+              text = block.decode('utf-8', errors='replace')
+              message = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title=Editing regression diagnostics {index}/{len(blocks)}::' + message)
           PYTHON
             {
               echo "### Editing regression failure: ${{ matrix.target }}"
