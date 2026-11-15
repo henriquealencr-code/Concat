@@ -3041,7 +3041,7 @@ impl Studio {
         }
         // The words first, so everything published from here on is in
         // the remembered language.
-        i18n::select(prefs.locale.as_deref().unwrap_or(i18n::ENGLISH), &host.dirs);
+        i18n::select(prefs.locale.as_deref().unwrap_or("pt-BR"), &host.dirs);
         let languages = i18n::languages(&host.dirs);
         let recents = projects::recents(&host.dirs.config);
         let text_presets = presets::all(&host.dirs);
@@ -3606,7 +3606,7 @@ mod tests {
     fn home_folder_is_under_home_with_native_separators() {
         let home = std::env::home_dir().expect("a home directory");
         let folder = std::path::PathBuf::from(home_folder("Desktop/Concat"));
-        assert_eq!(folder, home.join("Desktop").join("Concat"));
+        assert_eq!(folder, home.join("Desktop").join("Berseker"));
         #[cfg(windows)]
         assert!(!folder.to_string_lossy().contains('/'));
     }

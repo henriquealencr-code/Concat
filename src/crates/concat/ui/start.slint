@@ -1923,12 +1923,10 @@ component NarrowHome inherits Rectangle {
 
             HorizontalLayout {
                 spacing: 8px;
-
+                Image { width: 48px; height: 48px; source: @image-url("../../../../assets/icons/berseker_128.png"); image-fit: contain; }
                 Text {
                     horizontal-stretch: 1;
-                    text: root.recents-total == 0
-                        ? I18n.t("start.welcome")
-                        : I18n.t("start.welcomeBack");
+                    text: "Berseker";
                     color: Theme.fg;
                     font-size: 26px;
                     font-weight: Theme.weight-display;

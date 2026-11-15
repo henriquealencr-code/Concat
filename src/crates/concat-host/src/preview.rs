@@ -28,6 +28,37 @@ use concat_project::model::ColorSpace;
 /// see [`Monitor::prefetch`].
 const NEXT_CUT: f64 = 1.0;
 
+/// Playback-only quality governor. Does not mutate document/export settings.
+#[derive(Default)]
+pub struct AdaptiveQuality {
+    tier: usize,
+    slow: u8,
+}
+impl AdaptiveQuality {
+    /// Effective tier while moving; paused frames retain the user's choice.
+    pub fn tier(&self, chosen: usize, moving: bool) -> usize {
+        chosen.max(if moving { self.tier } else { 0 })
+    }
+    /// Four late frames lower one tier, bounded at quarter resolution.
+    pub fn observe(&mut self, chosen: usize, fps: f64, elapsed: std::time::Duration) -> bool {
+        if elapsed.as_secs_f64() > 1.5 / fps.max(1.0) {
+            self.slow = self.slow.saturating_add(1);
+        } else {
+            self.slow = 0;
+        }
+        if self.slow >= 4 && self.tier.max(chosen) < 2 {
+            self.tier = self.tier.max(chosen) + 1;
+            self.slow = 0;
+            return true;
+        }
+        false
+    }
+    /// Explicit selection and project changes discard playback measurements.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// A frame request: the instant and the size, with the clips coming from
 /// the session that owns them.
 #[derive(Clone, Copy, Debug)]
@@ -541,5 +572,38 @@ impl Monitor {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
+    }
+}
+
+#[cfg(test)]
+mod adaptive_tests {
+    use super::AdaptiveQuality;
+    use std::time::Duration;
+    #[test]
+    fn late_4k60_playback_reduces_only_preview_and_pause_restores_chosen_size() {
+        let mut policy = AdaptiveQuality::default();
+        let late = Duration::from_millis(40);
+        for _ in 0..3 {
+            assert!(!policy.observe(1, 60.0, late));
+        }
+        assert_eq!(policy.tier(1, true), 1);
+        assert!(policy.observe(1, 60.0, late));
+        assert_eq!(policy.tier(1, true), 2);
+        assert_eq!(policy.tier(1, false), 1);
+        for _ in 0..50 {
+            assert!(!policy.observe(1, 60.0, late));
+        }
+        assert_eq!(policy.tier(1, true), 2);
+        policy.reset();
+        assert_eq!(policy.tier(0, true), 0);
+    }
+    #[test]
+    fn an_isolated_slow_frame_does_not_reduce_quality() {
+        let mut policy = AdaptiveQuality::default();
+        for _ in 0..20 {
+            policy.observe(1, 60.0, Duration::from_millis(200));
+            policy.observe(1, 60.0, Duration::from_millis(5));
+        }
+        assert_eq!(policy.tier(1, true), 1);
     }
 }

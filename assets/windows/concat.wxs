@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Concat's Windows Installer package, the .msi beside the Inno Setup .exe.
+  Berseker's Windows Installer package, the .msi beside the Inno Setup .exe.
 
   Built by build-app.yml with WiX from the staged folder the .exe is made
   of, so the two installers ship the same files. The .exe is the
@@ -8,9 +8,9 @@
   Group Policy, Intune, winget - and it installs for the machine, into
   Program Files, with a Start menu entry and a clean uninstall. Handed in:
 
-    wix build -arch x64 -d Version=0.2.11 -d Root=C:\...\Concat
-              -d Stage=C:\...\stage\Concat-0.2.11-windows-x86_64
-              -o stage\Concat-0.2.11-windows-x86_64.msi assets\windows\concat.wxs
+    wix build -arch x64 -d Version=0.2.11 -d Root=C:\...\Berseker
+              -d Stage=C:\...\stage\Berseker-0.2.11-windows-x86_64
+              -o stage\Berseker-0.2.11-windows-x86_64.msi assets\windows\concat.wxs
 
   Root is the repository: WiX resolves a source path against where it is
   run from, not against this file.
@@ -18,27 +18,27 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <!-- One upgrade code for the life of the product, so a newer .msi
        replaces an older one rather than sitting beside it. -->
-  <Package Name="Concat"
-           Manufacturer="Concat contributors"
+  <Package Name="Berseker"
+           Manufacturer="Berseker contributors"
            Version="$(var.Version)"
-           UpgradeCode="6C4D5D8E-9B2A-4F3B-8E1C-5A7D2B9F0C11"
+           UpgradeCode="AD971E66-0461-457C-BD94-10B5F89D7DFA"
            Scope="perMachine"
-           Language="1033">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Concat is already installed." />
+           Language="1046">
+    <MajorUpgrade DowngradeErrorMessage="Uma versão mais recente do Berseker já está instalada." />
     <MediaTemplate EmbedCab="yes" />
 
-    <Icon Id="concat.ico" SourceFile="$(var.Root)\assets\icons\concat.ico" />
-    <Property Id="ARPPRODUCTICON" Value="concat.ico" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/jub0t/Concat" />
+    <Icon Id="berseker.ico" SourceFile="$(var.Root)\assets\icons\berseker.ico" />
+    <Property Id="ARPPRODUCTICON" Value="berseker.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/henriquealencr-code/Concat" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Concat" />
+      <Directory Id="INSTALLFOLDER" Name="Berseker" />
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
-      <Directory Id="ShortcutFolder" Name="Concat" />
+      <Directory Id="ShortcutFolder" Name="Berseker" />
     </StandardDirectory>
 
-    <Feature Id="Main" Title="Concat" Level="1">
+    <Feature Id="Main" Title="Berseker" Level="1">
       <ComponentGroupRef Id="Program" />
       <ComponentRef Id="StartMenu" />
     </Feature>
@@ -48,25 +48,25 @@
       <Files Include="$(var.Stage)\**" />
     </ComponentGroup>
 
-    <Component Id="StartMenu" Directory="ShortcutFolder" Guid="2F0B7C51-6E4D-4A1B-9C3E-8D5F1A2B3C44">
+    <Component Id="StartMenu" Directory="ShortcutFolder" Guid="2509A3AA-D88B-47F8-8449-0804DB98F918">
       <Shortcut Id="StartMenuShortcut"
-                Name="Concat"
-                Description="Video editor"
-                Target="[INSTALLFOLDER]concat.exe"
+                Name="Berseker"
+                Description="Editor de vídeo"
+                Target="[INSTALLFOLDER]Berseker.exe"
                 WorkingDirectory="INSTALLFOLDER"
-                Icon="concat.ico" />
+                Icon="berseker.ico" />
       <!-- The way in when a graphics driver draws the window as coloured
            squares: it turns off Settings > General > Draw on the GPU,
            which that window hides. -->
       <Shortcut Id="SafeGraphicsShortcut"
-                Name="Concat (safe graphics)"
-                Description="Concat, drawn in software"
-                Target="[INSTALLFOLDER]concat.exe"
+                Name="Berseker (gráficos seguros)"
+                Description="Berseker com renderização por software"
+                Target="[INSTALLFOLDER]Berseker.exe"
                 Arguments="--software"
                 WorkingDirectory="INSTALLFOLDER"
-                Icon="concat.ico" />
+                Icon="berseker.ico" />
       <RemoveFolder Id="RemoveShortcutFolder" On="uninstall" />
-      <RegistryValue Root="HKCU" Key="Software\Concat" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\Berseker" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
     </Component>
   </Package>
 </Wix>

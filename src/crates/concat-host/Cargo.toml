@@ -67,6 +67,8 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Media",
+  "Win32_Security",
+  "Win32_System_JobObjects",
   "Win32_System_SystemInformation",
   # memory.rs: the process heap compacted when the app goes quiet.
   "Win32_System_Memory",

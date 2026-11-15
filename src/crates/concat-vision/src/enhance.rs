@@ -491,6 +491,16 @@ impl Enhancer {
         ))))
     }
 
+    /// Explicit CPU-only inference with a bounded thread count and no GPU provider.
+    #[cfg(feature = "infer")]
+    pub fn load_cpu(file: &std::path::Path) -> Result<Enhancer, String> {
+        let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
+        let threads = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 4));
+        Ok(Enhancer::with(Box::new(Runtime(
+            crate::runtime::Model::from_bytes_on_cpu(&bytes, threads)?,
+        ))))
+    }
+
     /// The model run by `runner`.
     pub fn with(runner: Box<dyn WindowRunner>) -> Enhancer {
         Enhancer {

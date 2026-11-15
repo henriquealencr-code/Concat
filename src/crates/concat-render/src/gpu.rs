@@ -1307,7 +1307,12 @@ impl WgpuCompositor {
         } else {
             &[false, true]
         };
-        [own, wgpu::Backends::all()]
+        let backends = if let Some(explicit) = wgpu::Backends::from_env() {
+            vec![explicit]
+        } else {
+            vec![own, wgpu::Backends::all()]
+        };
+        backends
             .into_iter()
             .flat_map(|backends| {
                 choices

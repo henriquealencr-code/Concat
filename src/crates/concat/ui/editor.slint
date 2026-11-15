@@ -268,6 +268,8 @@ export global Editor {
     /// The engine's composited frame at the playhead, or an empty image
     /// while one is on its way. Set from Rust; see `Studio::request_preview`.
     in-out property <image> preview-frame;
+    in-out property <bool> preview-fullscreen: false;
+    callback toggle-preview-fullscreen();
     /// The timeline's canvas lets something show through (#456): the
     /// monitor draws a checker under the frame, so what is clear reads as
     /// clear rather than as the stage's black.

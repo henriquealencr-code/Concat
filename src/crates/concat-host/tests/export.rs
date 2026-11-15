@@ -3085,3 +3085,64 @@ fn forward_reverse_loops_trim_duplicate_turnaround_frames() {
         );
     }
 }
+
+#[test]
+fn a_preview_proxy_never_changes_the_exported_picture_or_sound() {
+    let scratch = Scratch::new("proxy-export-isolation");
+    let sources = Sources::make(scratch.path());
+    let proxy = scratch.path().join("black-proxy.mp4");
+    {
+        let mut writer = Encoder::create(
+            &proxy,
+            16,
+            16,
+            FrameRate::SIXTY,
+            &EncodeOptions {
+                codec: VideoCodec::Mpeg4,
+                hardware: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..240 {
+            writer.write_frame(&Frame::black(16, 16)).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    concat_host::scheduler()
+        .pool()
+        .adopt_proxy(&sources.cam, proxy);
+    let mut studio = Studio::new(
+        scratch.path(),
+        "Original export",
+        video(WIDTH, HEIGHT, 60, 1),
+    );
+    let media = studio.import(&sources.cam);
+    studio.apply(Command::AddClipAtFirstFree {
+        media_id: media,
+        start: 0.0,
+    });
+    let output = studio.exports.join("original-quality.mp4");
+    let request = export::request(
+        &studio.session,
+        &ExportSpec {
+            output: output.to_string_lossy().into(),
+            ..Default::default()
+        },
+        Vec::new(),
+    );
+    export::run(&request, &AtomicBool::new(false), |_| {}).unwrap();
+    let result = Exported::read("original-quality", &output, (60, 1));
+    assert_eq!(result.frames.len(), 240);
+    for (i, frame) in result.frames.iter().enumerate() {
+        assert_eq!((frame.width(), frame.height()), (WIDTH, HEIGHT));
+        let rgb = frame.pixel(WIDTH / 2, HEIGHT / 2).unwrap();
+        assert_eq!(
+            second_of_colour([rgb[0], rgb[1], rgb[2]]),
+            Some((i / 60) as u32),
+            "frame {i}"
+        );
+    }
+    result.expect_quiet(0.5);
+    result.expect_tone(3.5);
+}

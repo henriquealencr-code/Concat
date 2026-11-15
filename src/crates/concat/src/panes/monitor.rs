@@ -132,6 +132,9 @@ pub struct MonitorPane {
     asked: Option<std::time::Instant>,
     /// How the frames of the current playback arrived.
     cadence: Cadence,
+    // Runtime-only: never changes the document or export size.
+    adaptive: concat_host::preview::AdaptiveQuality,
+    prefetch_busy: Arc<std::sync::atomic::AtomicBool>,
     /// The instant last asked for, and when the playhead last moved: a
     /// move within [`SCRUB_GAP`] of the one before is a scrub.
     moved: Option<(f32, std::time::Instant)>,
@@ -214,13 +217,30 @@ impl MonitorPane {
                 self.busy = false;
                 let fps = studio.project().active().video.rate();
                 let wait = self.asked.take().map(|at| at.elapsed()).unwrap_or_default();
-                if spec.moving && result.is_ok() {
-                    self.cadence
-                        .count((spec.time * fps + 1e-6).floor() as i64, wait);
-                } else if !spec.moving {
+                let moving_ok = spec.moving && result.is_ok();
+                if !spec.moving {
                     self.cadence.report(fps);
                 }
+                let draw_started = std::time::Instant::now();
                 self.show(result, spec, studio);
+                let draw_wait = draw_started.elapsed();
+                if moving_ok {
+                    let total = wait + draw_wait;
+                    self.cadence
+                        .count((spec.time * fps + 1e-6).floor() as i64, total);
+                    let chosen = self.quality_of(studio.project());
+                    if self.adaptive.observe(chosen, fps, total) {
+                        log::info!(
+                            "preview: adaptive tier {}; decode/queue {:?}; upload/draw {:?}; {}x{}; proxy={}",
+                            self.adaptive.tier(chosen, true),
+                            wait,
+                            draw_wait,
+                            spec.width,
+                            spec.height,
+                            spec.proxy
+                        );
+                    }
+                }
                 if self.wanted {
                     self.request(studio, Lane::Main);
                 } else if self.inexact {
@@ -241,9 +261,13 @@ impl MonitorPane {
             MonitorMsg::QualityChanged(index) => {
                 let id = studio.project().active_timeline_id.clone();
                 self.quality.insert(id, (index.max(0) as usize).min(2));
+                self.adaptive.reset();
                 self.request(studio, Lane::Main);
             }
-            MonitorMsg::Opened => self.failed = false,
+            MonitorMsg::Opened => {
+                self.failed = false;
+                self.adaptive.reset();
+            }
             MonitorMsg::Closed => self.image = slint::Image::default(),
         }
     }
@@ -357,12 +381,13 @@ impl MonitorPane {
         if !refine {
             self.rest.stop();
         }
-        let (width, height) =
-            Self::frame_size(self.quality_of(studio.project()), studio.output_size());
+        let quality = self
+            .adaptive
+            .tier(self.quality_of(studio.project()), moving);
+        let (width, height) = Self::frame_size(quality, studio.output_size());
         let Some((clips, settings)) = studio.preview_clips() else {
             return;
         };
-        let quality = self.quality_of(studio.project());
         let spec = FrameSpec {
             time: f64::from(time),
             width,
@@ -390,8 +415,12 @@ impl MonitorPane {
             self.wanted = false;
             self.asked = Some(std::time::Instant::now());
         }
+        let prefetch_busy = Arc::clone(&self.prefetch_busy);
+        let queued = std::time::Instant::now();
         spawn_frame(
             move || {
+                let queue_wait = queued.elapsed();
+                let decode_started = std::time::Instant::now();
                 // On the window's device the frame stays a texture; without
                 // one it comes back as pixels and is uploaded here.
                 let frame = if monitor.has_gpu() {
@@ -403,6 +432,36 @@ impl MonitorPane {
                         .frame_pixels(Arc::clone(&clips), &settings, spec)
                         .map(|(bytes, exact)| Picture::Pixels(bytes, width, height, exact))
                 };
+                let decode_wait = decode_started.elapsed();
+                if spec.moving && (queue_wait.as_millis() > 100 || decode_wait.as_millis() > 100) {
+                    static LAST: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let second = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let previous = LAST.load(std::sync::atomic::Ordering::Relaxed);
+                    if second.saturating_sub(previous) >= 2
+                        && LAST
+                            .compare_exchange(
+                                previous,
+                                second,
+                                std::sync::atomic::Ordering::Relaxed,
+                                std::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
+                        log::info!(
+                            "preview: slow frame; worker queue {:?}; decode {:?}; {}x{}; proxy={}; time={:.3}",
+                            queue_wait,
+                            decode_wait,
+                            spec.width,
+                            spec.height,
+                            spec.proxy,
+                            spec.time
+                        );
+                    }
+                }
                 // Decode-ahead for whatever comes next, on a worker of its
                 // own, so the frame goes to the window without waiting for
                 // it and the next frame can start meanwhile. Playing, the
@@ -413,7 +472,16 @@ impl MonitorPane {
                 // it is passing through are walks from a keyframe, each one
                 // the cost the scrub went to the nearest picture to avoid,
                 // and in the way of the next.
-                if !spec.nearest {
+                if !spec.nearest
+                    && prefetch_busy
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::AcqRel,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok()
+                {
                     let monitor = monitor.clone();
                     let settings = settings.clone();
                     let ahead = if spec.moving {
@@ -421,7 +489,10 @@ impl MonitorPane {
                     } else {
                         2
                     };
-                    spawn_detached(move || monitor.prefetch(clips, &settings, spec, ahead));
+                    spawn_detached(move || {
+                        monitor.prefetch(clips, &settings, spec, ahead);
+                        prefetch_busy.store(false, std::sync::atomic::Ordering::Release);
+                    });
                 }
                 frame
             },

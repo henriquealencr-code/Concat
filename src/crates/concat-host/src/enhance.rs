@@ -58,7 +58,7 @@ pub const PREVIEW_HEIGHT: u32 = 360;
 pub const DEFAULT_STRENGTH: f32 = 0.75;
 
 /// What one enhancement covers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EnhanceRequest {
     /// The media file to read.
     pub media_path: String,
@@ -81,7 +81,7 @@ pub struct EnhanceRequest {
 
 /// What a preview covers: one frame of a file, at the size it would be
 /// enhanced to.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PreviewRequest {
     /// The media file to read.
     pub media_path: String,
@@ -141,6 +141,7 @@ pub struct Enhancers {
     /// The app's data directory, where the downloaded model lives.
     data: PathBuf,
     model: Mutex<Option<Arc<Enhancer>>>,
+    worker: Mutex<Option<PathBuf>>,
 }
 
 /// The scale as a copy's name says it: "2x" for a whole number, the name
@@ -229,7 +230,18 @@ impl Enhancers {
             gate: Arc::new(SingleFlight::new()),
             data: data.to_path_buf(),
             model: Mutex::new(None),
+            worker: Mutex::new(None),
         }
+    }
+
+    /// Isolate native model/GPU work in this desktop executable.
+    pub fn isolate_in(&self, executable: PathBuf) {
+        *self.worker.lock().expect("worker configuration") = Some(executable);
+    }
+
+    /// Reserves before scheduling a UI worker so immediate cancellation is retained.
+    pub fn reserve(&self) -> Result<crate::jobs::Job, String> {
+        self.gate.begin("enhance")
     }
 
     /// Whether an enhancement is running.
@@ -292,7 +304,35 @@ impl Enhancers {
         request: &EnhanceRequest,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<PathBuf, String> {
-        let result = self.enhance_inner(request, progress);
+        let job = self.reserve()?;
+        self.enhance_reserved(job, request, progress)
+    }
+
+    /// Runs an already-reserved job, preserving cancellation before worker start.
+    pub fn enhance_reserved(
+        &self,
+        job: crate::jobs::Job,
+        request: &EnhanceRequest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<PathBuf, String> {
+        if job.cancelled() {
+            return Err("Aprimoramento cancelado.".into());
+        }
+        if let Some(executable) = self
+            .worker
+            .lock()
+            .map_err(|_| "worker configuration poisoned")?
+            .clone()
+        {
+            return crate::enhance_worker::enhance(
+                &executable,
+                &self.data,
+                request,
+                &job,
+                progress,
+            );
+        }
+        let result = self.enhance_inner(request, progress, &job);
         if let Err(error) = &result {
             log::error!("enhance: job failed: {error}");
             // A failed GPU instance must not poison every subsequent retry.
@@ -307,11 +347,11 @@ impl Enhancers {
         &self,
         request: &EnhanceRequest,
         progress: &mut dyn FnMut(Progress),
+        job: &crate::jobs::Job,
     ) -> Result<PathBuf, String> {
         if request.target.is_file() {
             return Ok(request.target.clone());
         }
-        let job = self.gate.begin("enhance")?;
         let cancel = job.cancel_handle();
         preflight(&request.media_path, request.scale)?;
         let enhancer = self.loaded(&cancel, progress)?;
@@ -321,9 +361,9 @@ impl Enhancers {
         }
         progress(Progress::Analysing(0.0));
         let result = if request.still {
-            still(&enhancer, request, &job)
+            still(&enhancer, request, job)
         } else {
-            footage(&enhancer, request, &job, progress)
+            footage(&enhancer, request, job, progress)
         };
         result.map(|()| request.target.clone())
     }
@@ -339,7 +379,35 @@ impl Enhancers {
         request: &PreviewRequest,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<Preview, String> {
-        let result = self.preview_inner(request, progress);
+        let job = self.reserve()?;
+        self.preview_reserved(job, request, progress)
+    }
+
+    /// Runs an already-reserved job, preserving cancellation before worker start.
+    pub fn preview_reserved(
+        &self,
+        job: crate::jobs::Job,
+        request: &PreviewRequest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<Preview, String> {
+        if job.cancelled() {
+            return Err("Aprimoramento cancelado.".into());
+        }
+        if let Some(executable) = self
+            .worker
+            .lock()
+            .map_err(|_| "worker configuration poisoned")?
+            .clone()
+        {
+            return crate::enhance_worker::preview(
+                &executable,
+                &self.data,
+                request,
+                &job,
+                progress,
+            );
+        }
+        let result = self.preview_inner(request, progress, &job);
         if let Err(error) = &result {
             log::error!("enhance: preview failed: {error}");
             if let Ok(mut model) = self.model.lock() {
@@ -353,8 +421,8 @@ impl Enhancers {
         &self,
         request: &PreviewRequest,
         progress: &mut dyn FnMut(Progress),
+        job: &crate::jobs::Job,
     ) -> Result<Preview, String> {
-        let job = self.gate.begin("enhance")?;
         let cancel = job.cancel_handle();
         preflight(&request.media_path, request.scale)?;
         let enhancer = self.loaded(&cancel, progress)?;
@@ -705,11 +773,21 @@ pub(crate) fn crop(frame: &concat_core::Frame, width: u32, height: u32) -> conca
 /// the next two, in the app as it is, and both times are logged. ONNX
 /// Runtime on the CPU is what is left when no GPU opens.
 fn fastest(file: &Path) -> Result<Enhancer, String> {
-    let gpu = on_gpu(file);
+    let cpu = std::env::var("BERSEKER_ENHANCE_DEVICE")
+        .is_ok_and(|v| v.trim().eq_ignore_ascii_case("cpu"))
+        || std::env::var("CONCAT_GPU").is_ok_and(|v| v.trim().eq_ignore_ascii_case("software"));
+    if cpu {
+        log::info!("enhance: explicit CPU inference; no GPU instance will be opened");
+    }
+    let gpu = if cpu { None } else { on_gpu(file) };
     // The CPU is never a contender: where only it would answer, our
     // shaders' Enhancer stands alone and no runtime is raced against it.
     let runtime = if cfg!(target_vendor = "apple") || gpu.is_none() {
-        match Enhancer::load(file) {
+        match if cpu {
+            Enhancer::load_cpu(file)
+        } else {
+            Enhancer::load(file)
+        } {
             Ok(enhancer) => Some(enhancer),
             Err(error) => {
                 log::warn!("enhance: ONNX Runtime would not load it: {error}");
@@ -852,6 +930,9 @@ mod tests {
         let original = std::fs::read(&source).unwrap();
         let target = dir.path().join("enhanced.mp4");
         let service = Enhancers::new(dir.path());
+        if let Some(worker) = std::env::var_os("BERSEKER_TEST_WORKER") {
+            service.isolate_in(worker.into());
+        }
         let mut progressed = false;
         let made = service
             .enhance(

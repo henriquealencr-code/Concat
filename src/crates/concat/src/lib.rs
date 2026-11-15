@@ -363,6 +363,11 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
         }
     };
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    host.enhancers.isolate_in(
+        std::env::current_exe().map_err(|e| slint::PlatformError::Other(e.to_string()))?,
+    );
+
     // The base fonts, so the preset cards can be drawn in them.
     fonts::register();
     let app = App::new()?;
@@ -1597,6 +1602,17 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
     editor.on_ratio_changed(on_window!(|state, index: i32| {
         state.set_output((index.max(0) as usize).min(OUTPUTS.len() - 1));
     }));
+    editor.on_toggle_preview_fullscreen({
+        let weak = app.as_weak();
+        move || {
+            if let Some(app) = weak.upgrade() {
+                let editor = app.global::<Editor>();
+                let on = !editor.get_preview_fullscreen();
+                editor.set_preview_fullscreen(on);
+                app.window().set_fullscreen(on);
+            }
+        }
+    });
     editor.on_quality_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Monitor(MonitorMsg::QualityChanged(index)));
     }));

@@ -17,6 +17,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // but an exit code (#326). It writes to standard error until the log
     // opens, and to both after.
     concat_host::crash::catch();
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--enhance-worker")) {
+        let result = std::env::args_os()
+            .nth(2)
+            .ok_or_else(|| "missing worker directory".to_owned())
+            .and_then(|path| concat_host::enhance_worker::run(std::path::Path::new(&path)));
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let launch = launch::parse(std::env::args_os().skip(1));
     // Before the log, the GPU and the window: all this proves is that the
     // executable and the libraries it links were loaded, and it should
@@ -24,7 +35,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // with no standard output - is not a reason to panic.
     if launch == Ok(Launch::Version) {
         use std::io::Write;
-        let _ = writeln!(std::io::stdout(), "concat {}", env!("CARGO_PKG_VERSION"));
+        let _ = writeln!(std::io::stdout(), "Berseker {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     // The API's contract, for a client generator or the docs: no log, no

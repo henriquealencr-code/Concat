@@ -783,6 +783,7 @@ export component PreviewPane inherits Rectangle {
     callback step(frames: float);
     callback ratio-changed(index: int);
     callback quality-changed(index: int);
+    callback fullscreen-toggled();
 
     // The stage's own gestures; see the Editor global for what each means.
     callback stage-pressed(x: float, y: float, additive: bool);
@@ -1344,6 +1345,15 @@ export component PreviewPane inherits Rectangle {
                             options: [I18n.t("common.full"), I18n.t("previewPane.half"), I18n.t("previewPane.quarter")];
                             details: ["1:1", "1:2", "1:4"];
                             changed(index) => { root.quality-changed(index); }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            glyph: Glyph.maximize;
+                            label: I18n.t("previewPane.fullscreen");
+                            clicked => { root.fullscreen-toggled(); }
                         }
                     }
 

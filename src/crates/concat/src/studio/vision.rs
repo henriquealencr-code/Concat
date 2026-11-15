@@ -665,6 +665,13 @@ impl Studio {
             seconds,
             scale,
         };
+        let job = match self.host.enhancers.reserve() {
+            Ok(job) => job,
+            Err(error) => {
+                self.notify(&error, true);
+                return;
+            }
+        };
         self.enhance_previewing = Some((id.clone(), false, 0.0));
         let enhancers = Arc::clone(&self.host.enhancers);
         let epoch = crate::host::project_epoch();
@@ -672,7 +679,7 @@ impl Studio {
         spawn_in_project(
             move || {
                 let mut last = -1.0f32;
-                let result = enhancers.preview(&request, &mut |progress| {
+                let result = enhancers.preview_reserved(job, &request, &mut |progress| {
                     // The model's download is the one slow part a preview
                     // can have; the tiles themselves take seconds.
                     if let concat_host::enhance::Progress::Fetching { received, total } = progress {
@@ -786,6 +793,13 @@ impl Studio {
         };
         let percent = concat_host::enhance::strength_percent(strength);
         let clip_id = clip.id.clone();
+        let job = match self.host.enhancers.reserve() {
+            Ok(job) => job,
+            Err(error) => {
+                self.notify(&error, true);
+                return;
+            }
+        };
         self.enhance_jobs.insert(clip_id.clone(), (false, 0.0));
         self.notify(
             &tf(
@@ -800,7 +814,7 @@ impl Studio {
             move || {
                 let mut last = (false, -1.0f32);
                 let reporting = clip_id.clone();
-                let result = enhancers.enhance(&request, &mut |progress| {
+                let result = enhancers.enhance_reserved(job, &request, &mut |progress| {
                     let now = match progress {
                         concat_host::enhance::Progress::Fetching { received, total } => {
                             (true, received as f32 / total.max(1) as f32)

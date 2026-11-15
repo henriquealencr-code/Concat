@@ -54,7 +54,7 @@ pub struct AnalyseRequest {
 }
 
 /// How far an analysis has got, as it reports it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Progress {
     /// A model is being downloaded: bytes so far, of about this many.
     Fetching {

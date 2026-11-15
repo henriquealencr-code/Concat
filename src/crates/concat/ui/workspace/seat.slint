@@ -224,6 +224,7 @@ export component Seat inherits Rectangle {
             source-closed => { SourcePreview.closed(); }
             ratio-changed(index) => { Editor.ratio-changed(index); }
             quality-changed(index) => { Editor.quality-changed(index); }
+            fullscreen-toggled => { Editor.toggle-preview-fullscreen(); }
             stage-pressed(x, y, additive) => {
                 Editor.blur();
                 Editor.stage-pressed(x, y, additive);

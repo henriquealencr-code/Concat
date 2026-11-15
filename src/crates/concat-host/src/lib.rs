@@ -30,6 +30,7 @@ pub mod crash;
 pub mod cutout;
 pub mod dirs;
 pub mod enhance;
+pub mod enhance_worker;
 pub mod export;
 pub mod interpolate;
 pub mod jobs;

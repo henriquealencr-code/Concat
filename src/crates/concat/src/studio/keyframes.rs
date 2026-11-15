@@ -2200,6 +2200,13 @@ impl Studio {
             ),
             action("repeat", t("studio.repeatClips"), Glyph::Copy, "", !locked),
             action(
+                "reverse",
+                t("common.reverse"),
+                Glyph::Play,
+                "",
+                !locked && clip.kind == model::ClipKind::Video && self.reverse_jobs.is_empty(),
+            ),
+            action(
                 "paste",
                 t("studio.paste"),
                 Glyph::Plus,
@@ -2384,6 +2391,12 @@ impl Studio {
         // One Delete, not a Delete and a Ripple Delete: whether a delete
         // closes the gap is the tray's magnetic switch, a setting of the
         // timeline rather than a choice to make at every clip.
+        rows.retain(|row| {
+            !matches!(
+                row.id.as_str(),
+                "freeze" | "captions" | "voice-keep" | "voice-remove" | "export-audio"
+            )
+        });
         rows
     }
 
@@ -2540,7 +2553,7 @@ impl Studio {
         });
         let has_selection_media = !self.media.selected.is_empty();
 
-        match self.open_menu {
+        let mut rows = match self.open_menu {
             0 => vec![
                 row(
                     "add-selected",
@@ -2766,7 +2779,9 @@ impl Studio {
                 ),
             ],
             _ => Vec::new(),
-        }
+        };
+        rows.retain(|row| !matches!(row.id.as_str(), "template" | "speech"));
+        rows
     }
 
     /// The clip's track flags, as one command per flag that changed, plus

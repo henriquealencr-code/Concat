@@ -273,16 +273,8 @@ export component ConfigPane inherits Rectangle {
     property <bool> has-chain: root.applied-visual.length > 2
         || (root.applied-visual.length > 0 && !root.own-link(root.applied-visual[0].id))
         || (root.applied-visual.length > 1 && !root.own-link(root.applied-visual[1].id));
-    property <[string]> tabs: root.selected.batch-volume ? ["Audio"]
-        : root.is-text ? (root.has-chain ? ["Text", "Effects"] : ["Text"])
-        : root.is-layer ? ["Filter"]
-        : root.is-sound-layer ? ["Audio"]
-        : root.is-shape ? ["Video"]
-        : root.is-image ? (root.has-chain ? ["Video", "Effects"] : ["Video"])
-        : root.is-audio ? ["Audio"]
-        // A video without sound has nothing for an Audio tab to set.
-        : !root.selected.has-sound ? (root.has-chain ? ["Video", "Effects"] : ["Video"])
-        : root.has-chain ? ["Video", "Audio", "Effects"] : ["Video", "Audio"];
+    property <[string]> tabs: root.is-audio || root.selected.batch-volume ? ["Audio"]
+        : root.selected.has-sound ? ["Video", "Audio"] : ["Video"];
     /// The same tabs in the interface's language. `tabs` stays English,
     /// because the panels are picked by comparing against it.
     ///
@@ -347,45 +339,13 @@ export component ConfigPane inherits Rectangle {
         Math.min(root.tab, root.tabs.length - 1))];
 
     /// The sections of the current tab, as the dropdown lists them.
-    property <[string]> sections: root.heading == "Video"
-            ? (root.is-shape ? ["Shape", "Basic", "Animate"] : ["Basic", "Enhance", "Adjust", "Animate"])
-        // Audio's chain library is a page of its own, beside the level,
-        // fades and treatments rather than under them, the way Video's
-        // Adjust sits beside its Basic. Named apart from Video's "Basic"
-        // and the Effects tab's "Effects", since `showing` picks the panel
-        // by this name alone.
-        : root.heading == "Audio"
-            ? (root.selected.batch-volume ? ["Sound"]
-                : root.is-sound-layer ? ["Layer", "AudioEffects"]
-                : ["Sound", "AudioEffects"])
-        : root.heading == "Effects" ? ["Effects"]
-        : root.heading == "Text" ? ["Text", "Animate"]
-        : ["Layer", "Adjust", "Effects"];
+    property <[string]> sections: root.heading == "Audio" ? ["Sound"] : ["Basic", "Enhance"];
     /// A mark for each section, in the same order: where the clip sits,
     /// what makes it better, its colour's knobs; its level and its sound's
     /// chain; a layer's own strength, then its colour and its chain.
-    property <[Glyph]> section-icons: root.heading == "Video"
-            ? (root.is-shape ? [Glyph.shapes, Glyph.move, Glyph.circle-play]
-                : [Glyph.move, Glyph.wand, Glyph.sliders, Glyph.circle-play])
-        : root.heading == "Audio"
-            ? (root.selected.batch-volume ? [Glyph.volume]
-                : root.is-sound-layer ? [Glyph.filter, Glyph.waveform]
-                : [Glyph.volume, Glyph.waveform])
-        : root.heading == "Effects" ? [Glyph.sparkle]
-        : root.heading == "Text" ? [Glyph.text-mark, Glyph.circle-play]
-        : [Glyph.filter, Glyph.sliders, Glyph.sparkle];
+    property <[Glyph]> section-icons: root.heading == "Audio" ? [Glyph.volume] : [Glyph.move, Glyph.wand];
     /// The sections as the dropdown shows them; see `tabs-shown`.
-    property <[string]> sections-shown: root.heading == "Video"
-            ? (root.is-shape ? [I18n.t("shapePanel.shape"), I18n.t("configPane.basic"), I18n.t("motion.animate")]
-                : [I18n.t("configPane.basic"), I18n.t("common.enhance"), I18n.t("common.adjust"),
-                    I18n.t("motion.animate")])
-        : root.heading == "Audio"
-            ? (root.selected.batch-volume ? [I18n.t("configPane.basic")]
-                : root.is-sound-layer ? [I18n.t("common.layer"), I18n.t("configPane.audioEffects")]
-                : [I18n.t("configPane.basic"), I18n.t("configPane.audioEffects")])
-        : root.heading == "Effects" ? [I18n.t("common.effects")]
-        : root.heading == "Text" ? [I18n.t("common.text"), I18n.t("motion.animate")]
-        : [I18n.t("common.layer"), I18n.t("common.adjust"), I18n.t("common.effects")];
+    property <[string]> sections-shown: root.heading == "Audio" ? [I18n.t("configPane.basic")] : [I18n.t("configPane.basic"), I18n.t("common.enhance")];
 
     // Each tab remembers its own section, so flipping to Audio and back
     // lands on the colour panel you were adjusting. Assigned, never bound,
@@ -826,7 +786,7 @@ export component ConfigPane inherits Rectangle {
                     // they are chain links like any other, but they are the
                     // ones a sound clip usually needs, so they get a switch
                     // rather than a search.
-                    if !root.selected.batch-volume: ProcessorRows {
+                    if false: ProcessorRows {
                         applied: root.applied-audio;
                         params: root.audio-params;
                         add(id) => { root.chain-add(true, id); }

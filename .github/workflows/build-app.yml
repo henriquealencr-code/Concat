@@ -471,14 +471,22 @@ jobs:
         working-directory: src
         run: |
           set -euo pipefail
-          cargo test --locked -p concat-vision --features infer enhance::tests
-          cargo test --locked -p concat-render a_gpu_validation_error_is_returned_instead_of_panicking -- --nocapture
-          cargo test --locked -p concat-host enhance::tests -- --nocapture
-          python ../scripts/models.py mirror --only enhance-upscale --out "$RUNNER_TEMP/concat-enhance-model"
-          export CONCAT_ENHANCE_TEST_MODEL="$RUNNER_TEMP/concat-enhance-model/realesr-general-x4v3.onnx"
-          cargo test --locked -p concat-vision --features infer enhance::tests::a_real_model_restores_a_frame -- --ignored --exact --nocapture
-          cargo test --locked -p concat-vision --features infer enhance::tests::a_real_model_outputs_3840_by_2160 -- --ignored --exact --nocapture
-          cargo test --locked -p concat-host enhance::tests::a_real_video_is_enhanced_without_touching_the_source -- --ignored --exact --nocapture
+          {
+            cargo test --locked -p concat-vision --features infer enhance::tests
+            cargo test --locked -p concat-render a_gpu_validation_error_is_returned_instead_of_panicking -- --nocapture
+            cargo test --locked -p concat-host enhance::tests -- --nocapture
+            python ../scripts/models.py mirror --only enhance-upscale --out "$RUNNER_TEMP/concat-enhance-model"
+            export CONCAT_ENHANCE_TEST_MODEL="$RUNNER_TEMP/concat-enhance-model/realesr-general-x4v3.onnx"
+            cargo build --locked -p concat-host --example enhance-worker
+            export BERSEKER_TEST_WORKER="$PWD/target/debug/examples/enhance-worker.exe"
+            cargo test --locked -p concat-host --lib enhance_worker::tests -- --include-ignored --nocapture
+            cargo test --locked -p concat-host --lib adaptive_tests -- --nocapture
+            cargo test --locked -p concat-host --lib proxy::tests -- --nocapture
+            cargo test --locked -p concat-render backend_selection_tests -- --nocapture
+            cargo test --locked -p concat-vision --features infer enhance::tests::a_real_model_restores_a_frame -- --ignored --exact --nocapture
+            cargo test --locked -p concat-vision --features infer enhance::tests::a_real_model_outputs_3840_by_2160 -- --ignored --exact --nocapture
+            cargo test --locked -p concat-host enhance::tests::a_real_video_is_enhanced_without_touching_the_source -- --ignored --exact --nocapture
+          } 2>&1 | tee enhance-regressions.log
 
       - name: Editing regressions (Windows x64)
         if: matrix.platform == 'windows'
@@ -493,6 +501,7 @@ jobs:
             cargo test --locked -p concat-host interpolate::tests
             cargo test --locked -p concat-host --test export motion_sixty -- --nocapture
             cargo test --locked -p concat-host --test export source_modified_during_motion_conversion_does_not_land_a_stale_copy -- --exact --nocapture
+            cargo test --locked -p concat-host --test export a_preview_proxy_never_changes_the_exported_picture_or_sound -- --exact --nocapture
             cargo test --locked -p concat-host --test export cuts_between_frames_leave_no_black_frame -- --exact --nocapture
             cargo test --locked -p concat-host --test export a_reversed_span_plays_its_seconds_backwards -- --exact --nocapture
             cargo test --locked -p concat-host --test export repeated_video_sequence_has_every_frame_at_every_join -- --exact --nocapture
@@ -524,10 +533,12 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          if [ -f src/editing-regressions.log ]; then
-            python - <<'PYTHON'
+          python - <<'PYTHON'
           from pathlib import Path
-          path = Path('src/editing-regressions.log')
+          paths = [p for p in map(Path, ['src/enhance-regressions.log', 'src/editing-regressions.log', 'src/build.log']) if p.exists()]
+          path = paths[-1] if paths else None
+          if path is None:
+              raise SystemExit(0)
           with path.open('rb') as log:
               log.seek(0, 2)
               size = log.tell()
@@ -539,6 +550,7 @@ jobs:
               message = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               print(f'::error title=Editing regression diagnostics {index}/{len(blocks)}::' + message)
           PYTHON
+          if [ -f src/editing-regressions.log ]; then
             {
               echo "### Editing regression failure: ${{ matrix.target }}"
               echo '```'
@@ -958,10 +970,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $name = "Concat-$env:VERSION-windows-${{ matrix.arch }}"
+          $name = "Berseker-$env:VERSION-windows-${{ matrix.arch }}"
           $dir = "stage\$name"
           New-Item -ItemType Directory -Force $dir | Out-Null
-          Copy-Item "src\target\${{ matrix.target }}\app\concat.exe" $dir
+          Copy-Item "src\target\${{ matrix.target }}\app\concat.exe" "$dir\Berseker.exe"
           Copy-Item "$env:FFMPEG_DIR\bin\*.dll" $dir
           Copy-Item "$env:ORT_DIR\lib\*.dll" $dir
           # whisper's DLLs and its CPU modules, one per x86_64 generation
@@ -1043,7 +1055,7 @@ jobs:
           if (-not $signtool) { throw "signtool.exe is not in the Windows SDK" }
           "SIGNTOOL=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "SIGNING_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          $dir = "stage\Concat-$env:VERSION-windows-${{ matrix.arch }}"
+          $dir = "stage\Berseker-$env:VERSION-windows-${{ matrix.arch }}"
           $unsigned = Get-ChildItem $dir -Recurse -File -Include *.exe, *.dll |
             Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne "Valid" }
           foreach ($file in $unsigned) {
@@ -1064,7 +1076,22 @@ jobs:
         shell: pwsh
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: scripts/ci/smoke-windows.ps1 -Bundle "stage\Concat-$env:VERSION-windows-${{ matrix.arch }}"
+        run: scripts/ci/smoke-windows.ps1 -Bundle "stage\Berseker-$env:VERSION-windows-${{ matrix.arch }}"
+
+      - name: Enhance through packaged Berseker executable (Windows)
+        if: matrix.platform == 'windows'
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:BERSEKER_TEST_WORKER = "$PWD\stage\Berseker-$env:VERSION-windows-${{ matrix.arch }}\Berseker.exe"
+          $env:CONCAT_ENHANCE_TEST_MODEL = "$env:RUNNER_TEMP\concat-enhance-model\realesr-general-x4v3.onnx"
+          cargo test --locked --manifest-path src/Cargo.toml -p concat-host --lib enhance_worker::tests::real_model_comparison_preview_crosses_the_process_boundary -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Enhance preview failed" }
+          cargo test --locked --manifest-path src/Cargo.toml -p concat-host --lib enhance::tests::a_real_video_is_enhanced_without_touching_the_source -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Enhance video failed" }
 
       # The same, then `--version` under Intel's emulator posing as an Ivy
       # Bridge (#313). A step of its own, after the plain smoke test: in
@@ -1092,7 +1119,7 @@ jobs:
           $sde = (Get-ChildItem sde -Recurse -Filter sde.exe | Select-Object -First 1).FullName
           if (-not $sde) { throw "sde.exe is not in the archive" }
           Write-Host "SDE at $sde"
-          scripts/ci/smoke-windows.ps1 -Bundle "stage\Concat-$env:VERSION-windows-x86_64" -Sde $sde
+          scripts/ci/smoke-windows.ps1 -Bundle "stage\Berseker-$env:VERSION-windows-x86_64" -Sde $sde
 
       # Every x86_64 binary in the folder, disassembled and counted for
       # instructions an Ivy Bridge does not have, against what
@@ -1104,7 +1131,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         # llvm-objdump from the LLVM installed above, on the path.
-        run: scripts/ci/isa-scan.sh "stage/Concat-${VERSION}-windows-${{ matrix.arch }}"
+        run: scripts/ci/isa-scan.sh "stage/Berseker-${VERSION}-windows-${{ matrix.arch }}"
 
       # The installers, from the checked folder: Inno Setup's .exe and
       # WiX's .msi, each signed when the folder was.
@@ -1115,7 +1142,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $name = "Concat-$env:VERSION-windows-${{ matrix.arch }}"
+          $name = "Berseker-$env:VERSION-windows-${{ matrix.arch }}"
           function Sign($file) {
             if (-not $env:SIGNING_THUMBPRINT) { return }
             & $env:SIGNTOOL sign /sha1 $env:SIGNING_THUMBPRINT /s My /fd SHA256 `
@@ -1158,6 +1185,6 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Concat-${{ matrix.platform }}-${{ matrix.arch }}
+          name: ${{ matrix.platform == 'windows' && 'Berseker' || 'Concat' }}-${{ matrix.platform }}-${{ matrix.arch }}
           path: stage/*
           if-no-files-found: error

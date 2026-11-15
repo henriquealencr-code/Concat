@@ -160,6 +160,7 @@ impl Studio {
             "copy" => self.copy_clips(Some(id)),
             "duplicate" => self.duplicate_selected(),
             "interpolate60" => self.interpolate_clip(id),
+            "reverse" => self.reverse_clip(id),
             "repeat" => {
                 if !self.selection.iter().any(|held| held == id) {
                     self.selection = vec![id.to_owned()];

@@ -212,10 +212,10 @@ fn default_location() -> String {
 /// new project failed with EPERM. https://github.com/jub0t/Concat/issues/299
 fn location_on(os: &str, desktop: Option<PathBuf>, home: impl Fn(&str) -> String) -> String {
     match os {
-        "android" => home("Concat"),
+        "android" => home("Berseker"),
         "ios" => home("Documents/Concat"),
         _ => desktop
-            .map(|desktop| desktop.join("Concat").to_string_lossy().into_owned())
+            .map(|desktop| desktop.join("Berseker").to_string_lossy().into_owned())
             .unwrap_or_else(|| home("Desktop/Concat")),
     }
 }
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(location_on("android", None, home), "/home/Concat");
         assert_eq!(
             PathBuf::from(location_on("macos", desktop(), home)),
-            Path::new("/desk").join("Concat")
+            Path::new("/desk").join("Berseker")
         );
         assert_eq!(location_on("linux", None, home), "/home/Desktop/Concat");
     }

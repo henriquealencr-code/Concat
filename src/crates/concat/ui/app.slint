@@ -191,11 +191,11 @@ export {
     NewVoiceData,
 }
 export component App inherits Window {
-    title: "Concat";
+    title: "Berseker";
     // The taskbar's and Alt-Tab's picture on Windows, and the window
     // list's on X11. A Mac takes its Dock icon from the bundle and ignores
     // this; the .exe's own, for Explorer, is embedded by build.rs.
-    icon: @image-url("../../../../assets/icons/concat_logo_256.png");
+    icon: @image-url("../../../../assets/icons/berseker_256.png");
     // Where the strip carries its own window buttons the platform's
     // decorations are not wanted, and this is the property Slint keeps
     // them off with: the winit backend re-applies `no-frame` to the
@@ -226,6 +226,8 @@ export component App inherits Window {
     // window opens with nothing focused, and a key would have nowhere to be
     // delivered from until the first press landed somewhere.
     forward-focus: keys;
+    property <bool> fullscreen-active: Editor.preview-fullscreen;
+    changed fullscreen-active => { if (!root.fullscreen-active) { keys.focus(); } }
 
     // The same hole opens again later, and `forward-focus` does not close
     // it: it is read once, when the window first focuses. Slint delivers a
@@ -666,6 +668,7 @@ export component App inherits Window {
             // finishes the activity, so Back with Export or a sheet open
             // quit the app, a running export with it.
             if (event.text == Key.Escape || event.text == Key.Back) {
+                if (Editor.preview-fullscreen) { Editor.toggle-preview-fullscreen(); return accept; }
                 if (Editor.motion-open) { Editor.motion-cancel(); Editor.motion-open = false; return accept; }
                 if (Editor.repeat-open) { Editor.repeat-open = false; return accept; }
                 if (root.confirm.open) { root.confirm-dismissed(); return accept; }
@@ -823,6 +826,23 @@ export component App inherits Window {
                 open-settings => { root.open-settings(); }
                 close-project => { root.app-menu-selected("close-project"); }
             }
+        }
+    }
+
+    if Editor.preview-fullscreen: FocusScope {
+        width: 100%; height: 100%;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape || event.text == Key.Back) {
+                Editor.toggle-preview-fullscreen(); return accept;
+            }
+            if (event.text == " ") { Editor.play-toggled(); return accept; }
+            return reject;
+        }
+        Rectangle {
+            width: 100%; height: 100%; background: #000;
+            Image { width: 100%; height: 100%; source: Editor.preview-frame; image-fit: contain; }
+            Text { x: 16px; y: 16px; text: I18n.t("previewPane.exitFullscreen"); color: #fff; }
         }
     }
 

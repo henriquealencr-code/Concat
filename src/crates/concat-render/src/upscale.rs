@@ -261,8 +261,17 @@ fn groups(channels: usize) -> usize {
 
 // Match the compositor: Auto can load an unrelated dxcompiler.dll from
 // PATH on Windows and fault natively before Rust can report an error.
+fn selected_backends(explicit: Option<wgpu::Backends>, windows: bool) -> wgpu::Backends {
+    explicit.unwrap_or(if windows {
+        wgpu::Backends::DX12
+    } else {
+        wgpu::Backends::PRIMARY
+    })
+}
+
 fn instance_descriptor() -> wgpu::InstanceDescriptor {
     let mut descriptor = wgpu::InstanceDescriptor {
+        backends: selected_backends(wgpu::Backends::from_env(), cfg!(windows)),
         memory_budget_thresholds: crate::gpu::memory_budget(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     };
@@ -276,7 +285,12 @@ impl Upscaler {
     /// `side` pixels across, on the first GPU that opens - `None` where
     /// there is none, and the caller runs the model the slow way.
     pub fn new(layers: &[ConvLayer], scale: u32, side: u32) -> Option<Upscaler> {
-        let instance = wgpu::Instance::new(instance_descriptor());
+        let descriptor = instance_descriptor();
+        log::info!(
+            "enhance: creating GPU instance with backends {:?}",
+            descriptor.backends
+        );
+        let instance = wgpu::Instance::new(descriptor);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
@@ -291,6 +305,7 @@ impl Upscaler {
             adapter.limits()
         );
         let half = adapter.features().contains(wgpu::Features::SHADER_F16);
+        log::info!("enhance: requesting compute device; f16={half}");
         let (device, queue) = pollster::block_on(
             adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("concat upscaler"),
@@ -306,6 +321,7 @@ impl Upscaler {
             }),
         )
         .ok()?;
+        log::info!("enhance: compute device opened; allocating inference buffers");
         Self::on(device, queue, layers, scale, side, half)
     }
 
@@ -871,5 +887,26 @@ mod tests {
                 each * windows
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::*;
+    #[test]
+    fn windows_default_is_dx12_and_an_explicit_backend_is_never_replaced() {
+        assert_eq!(selected_backends(None, true), wgpu::Backends::DX12);
+        assert_eq!(
+            selected_backends(Some(wgpu::Backends::VULKAN), true),
+            wgpu::Backends::VULKAN
+        );
+        assert_eq!(
+            selected_backends(Some(wgpu::Backends::DX12), true),
+            wgpu::Backends::DX12
+        );
+        assert_eq!(
+            selected_backends(Some(wgpu::Backends::empty()), true),
+            wgpu::Backends::empty()
+        );
     }
 }

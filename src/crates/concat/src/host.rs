@@ -90,9 +90,8 @@ impl Host {
             server: None,
             open_projects: concat_api::OpenProjects::default(),
         };
-        // Every effect's pipeline, compiled while the window opens rather
-        // than at the first frame each effect draws.
-        host.monitor.warm_shaders();
+        // Berseker does not eagerly compile the original 85 effect pipelines.
+        // Legacy projects compile only the effects they actually use.
         Ok(host)
     }
 }

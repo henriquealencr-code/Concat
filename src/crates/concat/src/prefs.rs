@@ -362,7 +362,10 @@ impl Preferences {
     pub fn load(dirs: &AppDirs) -> Self {
         let path = dirs.config.join(FILE);
         let Ok(bytes) = std::fs::read(&path) else {
-            return Self::default();
+            return Self {
+                proxies: true,
+                ..Self::default()
+            };
         };
         if let Ok(preferences) = serde_json::from_slice(&bytes) {
             return preferences;

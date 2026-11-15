@@ -412,7 +412,7 @@ export component TimelineTray inherits Rectangle {
 
         Divider { }
 
-        TrayButton {
+        if false: TrayButton {
             glyph: Glyph.text-mark;
             label: I18n.t("tray.generateCaptions");
             icon-size: 16px;
@@ -420,7 +420,7 @@ export component TimelineTray inherits Rectangle {
             checked: Editor.captions-open;
             clicked => { root.captions(); }
         }
-        TrayButton {
+        if false: TrayButton {
             glyph: Glyph.volume;
             label: I18n.t("tray.textToSpeech");
             icon-size: 16px;
@@ -429,7 +429,7 @@ export component TimelineTray inherits Rectangle {
         }
         // A voiceover: the picture rolls from the playhead and the words go
         // onto a lane under it. The same button stops the take.
-        TrayButton {
+        if false: TrayButton {
             glyph: root.recording ? Glyph.stop : Glyph.mic;
             label: root.recording ? I18n.t("tray.stopRecording") : I18n.t("tray.recordVoiceover");
             icon-size: 16px;

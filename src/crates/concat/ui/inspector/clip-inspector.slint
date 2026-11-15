@@ -1833,7 +1833,7 @@ export component VideoPanel inherits VerticalLayout {
     // The camera's shake taken out: the media's movement is measured once
     // in the background, and the correction is worked out from it live, so
     // the sliders answer at once. Footage only.
-    if root.selected.kind == ClipKind.video: Section {
+    if false: Section {
         stabilize := SectionHeader {
             title: I18n.t("clipInspector.stabilize");
             collapsible: true;
@@ -1908,7 +1908,7 @@ export component VideoPanel inherits VerticalLayout {
     // monitor over it - and chroma key drops a colour. A key is the chroma
     // package on the chain, which is why its knobs read from the chain's
     // own rows. One at a time: ticking a block unticks the others.
-    if !root.figure: Section {
+    if false: Section {
         cutout := SectionHeader {
             title: I18n.t("clipInspector.removeBackground");
             collapsible: true;
@@ -2145,7 +2145,7 @@ export component VideoPanel inherits VerticalLayout {
     // mode - add, subtract, intersect, or cut nothing and wait for a layer
     // or an effect. Each number keys on the mask itself. Drawn on the
     // picture as it is seen, so they move with the clip.
-    if root.mask-section
+    if false && root.mask-section
         && (root.selected.kind == ClipKind.video || root.selected.kind == ClipKind.image): Section {
         mask-header := SectionHeader {
             title: I18n.t("mask.title");
@@ -2411,7 +2411,7 @@ export component VideoPanel inherits VerticalLayout {
 
     // What is cut off the source before it is fitted. Fractions of the
     // source's own edges, so a crop survives a change of output size.
-    if !root.figure: Section {
+    if false: Section {
         crop := SectionHeader {
             title: I18n.t("clipInspector.crop");
             collapsible: true;
@@ -3044,7 +3044,7 @@ export component AudioPanel inherits VerticalLayout {
     // the two at levels of their own - the music under a talk brought down
     // rather than off, the hiss taken out from under a voice. Its switch
     // is its header; on, what the sound is, then the two parts.
-    if !root.selected.batch-volume: Section {
+    if false: Section {
         SectionBody {
             HorizontalLayout {
                 padding-left: Theme.pad;
@@ -3121,7 +3121,7 @@ export component AudioPanel inherits VerticalLayout {
     // The rate and the pitch, together: whether the voice keeps its pitch
     // is a question about the rate. A sound clip's rate is set here; a
     // picture's sound rides its picture's, set under Video.
-    if !root.selected.batch-volume: Section {
+    if false: Section {
         SectionBody {
             SwitchRow {
                 label: I18n.t("clipInspector.changePitchWithSpeed");

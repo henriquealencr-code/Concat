@@ -273,6 +273,57 @@ pub fn write(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_4k_sixty_proxy_keeps_every_frame_and_leaves_the_original_intact() {
+        use concat_core::{Frame, FrameRate};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("uhd60.mp4");
+        {
+            let mut writer = Encoder::create(
+                &source,
+                3840,
+                2160,
+                FrameRate::SIXTY,
+                &EncodeOptions {
+                    codec: VideoCodec::Mpeg4,
+                    hardware: false,
+                    threads: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut frame = Frame::black(3840, 2160);
+            for i in 0..60u8 {
+                for pixel in frame.pixels_mut().chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[20 + i * 3, 70, 100, 255]);
+                }
+                writer.write_frame(&frame).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let original = std::fs::read(&source).unwrap();
+        let target = root.path().join("proxy.mp4");
+        let size = size_for(3840, 2160);
+        assert_eq!(size, (960, 540));
+        write(source.to_str().unwrap(), &target, size, None).unwrap();
+        let info = concat_media::probe(&target).unwrap().video.unwrap();
+        assert_eq!((info.width, info.height), size);
+        assert_eq!(info.frame_rate, FrameRate::SIXTY);
+        let mut reader = Decoder::open(&target, &DecodeOptions::default().in_software()).unwrap();
+        let mut count = 0u32;
+        while let Some(frame) = reader.next_frame().unwrap() {
+            let pixel = frame.pixel(480, 270).unwrap();
+            assert!(
+                (i32::from(pixel[0]) - (20 + count as i32 * 3)).abs() <= 10,
+                "proxy frame {count}: {pixel:?}"
+            );
+            assert!(pixel[1] > 50, "no introduced black frames");
+            count += 1;
+        }
+        assert_eq!(count, 60);
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
+
     /// An HDR file's proxy keeps its signal: HEVC, HLG as the file is,
     /// its grey coming back as the same signal - under a name of its own,
     /// so the tone-mapped copy an earlier build wrote is written again.
