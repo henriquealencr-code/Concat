@@ -150,11 +150,48 @@ O workflow Windows agora inclui essas regressões antes de compilar o pacote. O
 push na branch `work` inicia **Windows x64** automaticamente. Para baixar uma
 execução concluída, abra **Actions → Windows x64 → execução → Artifacts →
 Concat-windows-x86_64**, extraia o ZIP e execute o `*-setup.exe` ou use o `.msi`.
-A geração da versão com todas as novas funções ainda precisa ser confirmada na
-execução correspondente ao commit dessas alterações.
+O pacote com as novas funções foi gerado na execução abaixo, para o commit
+`4c0ac78c` da branch `work`.
+
+Na [execução Windows x64 #6](https://github.com/henriquealencr-code/Concat/actions/runs/43728461509),
+as regressões do Enhance e de edição passaram no Windows: 257 testes de projeto,
+interpolação real, cancelamento, alteração da origem, cortes/junções, reversão,
+loops e mistura de faixas de áudio. O teste de alteração da origem passou após
+abrir seu arquivo com permissão de escrita para mudar somente a data: um handle
+somente de leitura não permite `set_modified` no Windows. O teste continua
+comparando os bytes originais e exigindo que a cópia e os parciais sejam
+descartados. Nenhuma verificação foi desativada.
+
+Essa execução também passou na compilação do perfil de distribuição, montagem
+do pacote, verificação de DLLs e inicialização da janela, compatibilidade com CPU
+antiga emulada e inspeção das instruções dos binários. Os instaladores
+`Concat-0.2.11-windows-x86_64-setup.exe` e
+`Concat-0.2.11-windows-x86_64.msi` foram gerados e enviados no artefato
+`Concat-windows-x86_64`. A instalação interativa dos instaladores e o uso manual
+das funções em uma máquina Windows com GPU física ainda não foram executados.
+O GitHub informa 193 MB para o artefato ZIP com os dois instaladores (isso não
+mede o tamanho instalado). SHA-256 do artefato informado pelo GitHub:
+`8c615a23f548af296a22e588c30a289e93c7762c2153cc48df81fa5dbf0de678`.
 
 Permanecem pendentes: validação interativa no Windows/GPU físico, medidas do
 pacote final e consumo em 4K60 de longa duração, casos VFR/HDR/multi-stream da
 interpolação e a remoção dos painéis/dependências antigos fora do escopo pedido.
 Nenhuma dependência de produção, ferramenta ou efeito não solicitado foi adicionado.
 O Enhance **não é considerado resolvido na máquina afetada**.
+
+## Validação manual ainda necessária no Windows
+
+Os logs ficam em `%LOCALAPPDATA%\app.concat.editor\logs` (ou em
+`portable\logs` quando existe uma pasta `portable` junto do executável).
+O painel de configurações permite abrir o log e escolher seu nível. Para
+investigar o fechamento original, registrar versão do Windows, GPU, driver,
+VRAM/RAM disponíveis, dimensões e duração da origem, modelo e tamanho de saída.
+O log deve mostrar a inicialização do adaptador, a verificação do modelo e a
+conclusão ou o erro do job. Uma falha nativa do driver pode exigir também o evento
+Application Error do Visualizador de Eventos do Windows.
+
+Em uma cópia de projeto, validar aprimoramento, cancelamento e tentativa com
+modelo indisponível/corrompido; confirmar a mensagem de erro, o aplicativo ainda
+aberto, a origem intacta e o projeto reabrindo. Validar também os novos menus,
+desfazer/refazer e salvar/reabrir, além de reproduzir e exportar as junções e
+loops. Esses procedimentos são pendentes; sua descrição não conta como execução.

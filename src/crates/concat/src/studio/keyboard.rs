@@ -70,7 +70,7 @@ impl Studio {
                 self.menu_target = None;
                 self.freeze_at_playhead();
             }
-            // After the selected clip, on its lane, as the menu does; with
+            // After the selected clip, keeping original tracks; with
             // nothing selected, at the playhead on the rows copied from.
             "paste" => {
                 let after = self.sole_selection();
@@ -168,7 +168,7 @@ impl Studio {
                     window.global::<Editor>().set_repeat_open(true);
                 });
             }
-            // Pasted after the clip that was right-clicked, on its lane.
+            // Pasted after the clicked clip, keeping the original tracks.
             "paste" => self.paste_clips(Some(id)),
             "split" => {
                 let at = self.playhead;

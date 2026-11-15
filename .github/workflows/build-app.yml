@@ -504,9 +504,9 @@ jobs:
       # The shipping profile: fat LTO, panic=abort, stripped. See the
       # workspace Cargo.toml for what each knob costs.
       #
-      # Bash on every platform, teed to a log: raw job logs need a login to
-      # read, but the step summary is public - so on failure the tail of the
-      # build goes there, and a red run explains itself to anyone.
+      # Bash on every platform, teed to a log. Keep failure tails in the
+      # summary; bounded editing-test annotations also expose diagnostics
+      # when GitHub requires authentication to read logs and summaries.
       - name: Build
         # The Mac runners are the slow ones, with three cores and 7 GB for
         # a window whose generated UI takes more than that to compile: the
