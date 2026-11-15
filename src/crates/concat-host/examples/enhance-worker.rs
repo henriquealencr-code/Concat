@@ -6,6 +6,11 @@ fn main() {
     let path = std::path::PathBuf::from(std::env::args_os().nth(2).expect("worker directory"));
     let text = std::fs::read_to_string(path.join("request.json")).unwrap();
     let forced_cpu = std::env::var("BERSEKER_ENHANCE_DEVICE").is_ok_and(|value| value == "cpu");
+    if text.contains("readback-source.png") && !forced_cpu {
+        std::fs::write(path.join("output.png"), b"incomplete").unwrap();
+        std::fs::write(path.join("reply.json"), r#"{"error":"upscaler: the answer would not map: Error occurred when trying to async map a buffer","preview":null}"#).unwrap();
+        return;
+    }
     if text.contains("abort-source.mp4") || (text.contains("fallback-source.png") && !forced_cpu) {
         std::fs::write(path.join("output.mp4"), b"incomplete video").unwrap();
         eprintln!("test: native abort after partial output");

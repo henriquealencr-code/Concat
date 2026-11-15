@@ -821,7 +821,7 @@ impl Studio {
                         }
                         concat_host::enhance::Progress::Analysing(fraction) => (false, fraction),
                     };
-                    if now.0 != last.0 || now.1 - last.1 >= 0.01 {
+                    if now.0 != last.0 || now.1 - last.1 >= 0.0001 {
                         last = now;
                         let id = reporting.clone();
                         on_ui_in_project(epoch, move |studio, _, _| {

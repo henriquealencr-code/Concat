@@ -563,6 +563,18 @@ impl Enhancer {
         height: u32,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Frame, String> {
+        self.enhance_with_progress(frame, width, height, cancelled, &mut |_| {})
+    }
+
+    /// Reports completed tiles, including within the first video frame.
+    pub fn enhance_with_progress(
+        &self,
+        frame: &Frame,
+        width: u32,
+        height: u32,
+        cancelled: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Frame, String> {
         self.render_region(
             frame,
             Tile {
@@ -574,6 +586,7 @@ impl Enhancer {
             width,
             height,
             cancelled,
+            progress,
         )
         .map(|(frame, _)| frame)
     }
@@ -592,6 +605,7 @@ impl Enhancer {
             (region.width as f32 * scale).round() as u32,
             (region.height as f32 * scale).round() as u32,
             &|| false,
+            &mut |_| {},
         )
     }
 
@@ -602,6 +616,7 @@ impl Enhancer {
         width: u32,
         height: u32,
         cancelled: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(f32),
     ) -> Result<(Frame, Vec<std::time::Duration>), String> {
         if region.width == 0
             || region.height == 0
@@ -646,7 +661,9 @@ impl Enhancer {
         let mut model = self.model.lock().map_err(|_| "enhance: model poisoned")?;
         let mut times = Vec::new();
         let side = (WINDOW * SCALE) as usize;
-        for tile in tiles(region.width, region.height) {
+        let tiles = tiles(region.width, region.height);
+        let total = tiles.len();
+        for (index, tile) in tiles.into_iter().enumerate() {
             if cancelled() {
                 return Err("enhance cancelled".to_owned());
             }
@@ -693,6 +710,7 @@ impl Enhancer {
                     }
                 }
             }
+            progress((index + 1) as f32 / total as f32);
         }
         if cancelled() {
             return Err("enhance cancelled".to_owned());
@@ -712,6 +730,25 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "infer")]
+    #[test]
+    fn tile_progress_advances_before_a_whole_frame_finishes() {
+        struct Flat;
+        impl WindowRunner for Flat {
+            fn run(&mut self, _: Vec<f32>) -> Result<Vec<f32>, String> {
+                Ok(vec![0.5; (3 * WINDOW * WINDOW * SCALE * SCALE) as usize])
+            }
+        }
+        let model = Enhancer::with(Box::new(Flat));
+        let frame = Frame::black(CORE + 1, 1);
+        let mut progress = Vec::new();
+        let got = model
+            .enhance_with_progress(&frame, CORE + 1, 1, &|| false, &mut |n| progress.push(n))
+            .unwrap();
+        assert_eq!(got.width(), CORE + 1);
+        assert!(progress[0] > 0.0 && progress[0] < 1.0);
+        assert_eq!(progress.last(), Some(&1.0));
+        assert!(progress.windows(2).all(|p| p[1] > p[0]));
+    }
     #[test]
     #[ignore = "requires a verified Real-ESRGAN file in CONCAT_ENHANCE_TEST_MODEL"]
     fn a_real_model_restores_a_frame() {
@@ -773,7 +810,7 @@ mod tests {
         for (w, h) in [(263, 5), (351, 7), (526, 10), (1052, 20)] {
             let want = area_resize(&large, w, h);
             let got = enhancer
-                .render_region(&frame, region, w, h, &|| false)
+                .render_region(&frame, region, w, h, &|| false, &mut |_| {})
                 .unwrap()
                 .0;
             assert_eq!((got.width(), got.height()), (w, h));

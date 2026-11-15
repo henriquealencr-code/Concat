@@ -1147,7 +1147,7 @@ component EnhanceRow inherits VerticalLayout {
             vertical-alignment: center;
         }
         Text {
-            text: "\{Math.floor(bar.shown * 100)}%";
+            text: "\{Math.floor(bar.shown * 10000) / 100}%";
             color: Theme.fg-muted;
             font-family: Theme.font-technical;
             font-size: Theme.fs;

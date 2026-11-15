@@ -239,6 +239,7 @@ pub struct Upscaler {
     scale: u32,
     /// Activations and weights are stored as f16.
     half: bool,
+    bounded_dispatch: bool,
     fault: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
@@ -322,7 +323,14 @@ impl Upscaler {
         )
         .ok()?;
         log::info!("enhance: compute device opened; allocating inference buffers");
-        Self::on(device, queue, layers, scale, side, half)
+        let info = adapter.get_info();
+        let mut upscaler = Self::on(device, queue, layers, scale, side, half)?;
+        upscaler.bounded_dispatch = info.vendor == 0x8086 && info.backend == wgpu::Backend::Dx12;
+        log::info!(
+            "enhance: bounded Intel DX12 dispatch={}",
+            upscaler.bounded_dispatch
+        );
+        Some(upscaler)
     }
 
     fn on(
@@ -605,6 +613,7 @@ impl Upscaler {
             return None;
         }
         Some(Upscaler {
+            bounded_dispatch: false,
             fault,
             device,
             queue,
@@ -659,46 +668,97 @@ impl Upscaler {
         }
         self.queue
             .write_buffer(&self.picture, 0, &stored(&packed, self.half));
+        // Bound work submitted at once on integrated Intel DX12. Preserve
+        // every layer and all arithmetic; let the driver retire each batch.
+        let batch = if self.bounded_dispatch {
+            4
+        } else {
+            self.layers.len().max(1)
+        };
+        for layers in self.layers.chunks(batch) {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("enhance convolution batch"),
+                });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("enhance convolution"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.conv);
+                for layer in layers {
+                    pass.set_bind_group(0, &layer.bind_group, &[]);
+                    pass.dispatch_workgroups(
+                        self.side.div_ceil(8 * BLOCK_W),
+                        self.side.div_ceil(8 * BLOCK_H),
+                        layer.out_groups.div_ceil(4),
+                    );
+                }
+            }
+            let submission = self.queue.submit([encoder.finish()]);
+            if self.bounded_dispatch {
+                self.device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: Some(submission),
+                        timeout: Some(std::time::Duration::from_secs(30)),
+                    })
+                    .map_err(|e| format!("upscaler: convolution batch did not finish: {e}"))?;
+            }
+        }
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("upscale"),
+                label: Some("enhance readback"),
             });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("upscale"),
+                label: Some("enhance shuffle"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.conv);
-            let across = self.side.div_ceil(8 * BLOCK_W);
-            let down = self.side.div_ceil(8 * BLOCK_H);
-            for layer in &self.layers {
-                pass.set_bind_group(0, &layer.bind_group, &[]);
-                pass.dispatch_workgroups(across, down, layer.out_groups.div_ceil(4));
-            }
             pass.set_pipeline(&self.shuffle);
             pass.set_bind_group(0, &self.shuffle_group, &[]);
             let big = (self.side * self.scale).div_ceil(8);
             pass.dispatch_workgroups(big, big, 1);
         }
         encoder.copy_buffer_to_buffer(&self.planes, 0, &self.staging, 0, self.planes.size());
-        self.queue.submit([encoder.finish()]);
+        let submission = self.queue.submit([encoder.finish()]);
 
         let slice = self.staging.slice(..);
         let (sent, mapped) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sent.send(result);
         });
-        self.device
+        let readback = self
+            .device
             .poll(wgpu::PollType::Wait {
-                submission_index: None,
+                submission_index: Some(submission),
                 timeout: Some(std::time::Duration::from_secs(30)),
             })
-            .map_err(|error| format!("upscaler: the device did not finish: {error}"))?;
-        mapped
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .map_err(|_| "upscaler: the device never answered".to_owned())?
-            .map_err(|error| format!("upscaler: the answer would not map: {error}"))?;
+            .map_err(|e| format!("upscaler: the device did not finish: {e}"))
+            .and_then(|_| {
+                mapped
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .map_err(|_| "upscaler: the device never answered".to_owned())?
+                    .map_err(|e| format!("upscaler: the answer would not map: {e}"))
+            });
+        if let Err(error) = readback {
+            // Failed mappings must never be reused as if the staging buffer
+            // were ready. Keep the device-lost reason with the original error.
+            self.staging.unmap();
+            let mut fault = self
+                .fault
+                .lock()
+                .map_err(|_| "upscaler: fault state poisoned")?;
+            let error = format!(
+                "{error}; device status: {:?}; readback bytes={}",
+                *fault,
+                self.staging.size()
+            );
+            log::error!("{error}");
+            *fault = Some(error.clone());
+            return Err(error);
+        }
         let answer = {
             let data = slice
                 .get_mapped_range()
@@ -772,7 +832,13 @@ mod tests {
             prelu: prelu.then(|| (0..outputs).map(|_| next() * 0.5).collect()),
         };
         let net = CompactNet {
-            layers: vec![conv(3, 8, true), conv(8, 8, true), conv(8, 12, false)],
+            layers: vec![
+                conv(3, 8, true),
+                conv(8, 8, true),
+                conv(8, 8, true),
+                conv(8, 8, true),
+                conv(8, 12, false),
+            ],
             scale: 2,
         };
         let side = 20usize;
@@ -794,11 +860,17 @@ mod tests {
                 prelu: l.prelu.clone(),
             })
             .collect();
-        let Some(gpu) = Upscaler::new(&layers, 2, side as u32) else {
-            eprintln!("no GPU here; skipped");
-            return;
-        };
-        let got = gpu.run(&planes).expect("runs");
+        let instance = wgpu::Instance::new(instance_descriptor());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
+            .expect("test adapter");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).expect("test device");
+        let mut gpu =
+            Upscaler::on(device, queue, &layers, 2, side as u32, false).expect("test network");
+        let ordinary = gpu.run(&planes).expect("ordinary submission");
+        gpu.bounded_dispatch = true;
+        let got = gpu.run(&planes).expect("bounded submission");
+        assert_eq!(got, ordinary, "batch boundaries must not change the answer");
         let want = net.run_reference(&planes, side);
         assert_eq!(got.len(), want.len());
         let worst = got

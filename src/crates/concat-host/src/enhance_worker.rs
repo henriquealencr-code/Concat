@@ -73,6 +73,13 @@ fn directory(base: &Path) -> Result<Directory, String> {
     }
     Err("Não foi possível reservar a pasta temporária do Enhance.".into())
 }
+fn gpu_failure(error: &str) -> bool {
+    error.starts_with("upscaler:")
+        || error.contains("GPU")
+        || error.contains("wgpu")
+        || error.contains("device lost")
+}
+
 fn execute_attempt(
     exe: &Path,
     data: &Path,
@@ -219,7 +226,7 @@ fn execute_attempt(
     let reply: Reply = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     if let Some(error) = &reply.error {
-        *crashed = error.contains("GPU") || error.contains("wgpu") || error.contains("device lost");
+        *crashed = gpu_failure(error);
         return Err(format!("{error}\nLog: {}", log_path.display()));
     }
     if job.cancelled() {
@@ -452,6 +459,15 @@ mod tests {
             .into()
     }
     #[test]
+    fn readback_errors_trigger_gpu_recovery_but_input_errors_do_not() {
+        assert!(gpu_failure(
+            "upscaler: the answer would not map: Error occurred when trying to async map a buffer"
+        ));
+        assert!(gpu_failure("upscaler: the device did not finish: timeout"));
+        assert!(!gpu_failure("enhance: invalid scale"));
+        assert!(!gpu_failure("source changed during processing"));
+    }
+    #[test]
     fn publication_never_replaces_an_existing_file() {
         let root = tempfile::tempdir().unwrap();
         let complete = root.path().join("complete.mp4");
@@ -545,6 +561,60 @@ mod tests {
         )
         .unwrap();
         let source = root.path().join("fallback-source.png");
+        {
+            let mut encoder = png::Encoder::new(File::create(&source).unwrap(), 16, 16);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[180, 60, 100, 255].repeat(256))
+                .unwrap();
+        }
+        let original = fs::read(&source).unwrap();
+        let service = Enhancers::new(root.path());
+        service.isolate_in(executable());
+        let target = root.path().join("completed.png");
+        service
+            .enhance(
+                &EnhanceRequest {
+                    media_path: source.to_string_lossy().into(),
+                    target: target.clone(),
+                    scale: 2.0,
+                    strength: 1.0,
+                    still: true,
+                    span: None,
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        let info = concat_media::probe(&target).unwrap().video.unwrap();
+        assert_eq!((info.width, info.height), (32, 32));
+        assert_eq!(fs::read(&source).unwrap(), original);
+        let logs: Vec<_> = fs::read_dir(root.path().join("logs"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().any(|p| {
+            fs::read_to_string(p)
+                .unwrap()
+                .contains("explicit CPU inference")
+        }));
+        assert!(!service.is_busy());
+    }
+    #[test]
+    #[ignore = "requires BERSEKER_TEST_WORKER and CONCAT_ENHANCE_TEST_MODEL"]
+    fn a_returned_readback_error_retries_real_cpu_without_accepting_partial_output() {
+        let root = tempfile::tempdir().unwrap();
+        let model = concat_vision::models::model_file(root.path(), concat_vision::ModelId::Enhance);
+        fs::create_dir_all(model.parent().unwrap()).unwrap();
+        fs::copy(
+            std::env::var_os("CONCAT_ENHANCE_TEST_MODEL").expect("verified model"),
+            model,
+        )
+        .unwrap();
+        let source = root.path().join("readback-source.png");
         {
             let mut encoder = png::Encoder::new(File::create(&source).unwrap(), 16, 16);
             encoder.set_color(png::ColorType::Rgba);

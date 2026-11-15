@@ -662,8 +662,17 @@ fn footage(
                         height,
                         crate::memory::available(),
                     )?;
-                    let model =
-                        enhancer.enhance_cancellable(&frame, width, height, &|| job.cancelled())?;
+                    let model = enhancer.enhance_with_progress(
+                        &frame,
+                        width,
+                        height,
+                        &|| job.cancelled(),
+                        &mut |tile| {
+                            progress(Progress::Analysing(
+                                ((count as f64 + f64::from(tile)) / expected).min(0.99) as f32,
+                            ));
+                        },
+                    )?;
                     lap(1, &mut t);
                     let enhanced = vision::mix(model, &frame, request.strength);
                     lap(2, &mut t);
