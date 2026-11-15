@@ -2972,7 +2972,10 @@ fn source_modified_during_motion_conversion_does_not_land_a_stale_copy() {
     let error = service
         .convert(sources.cam.to_str().unwrap(), &target, &mut |fraction| {
             if fraction > 0.02 && !touched {
-                std::fs::File::open(&sources.cam)
+                // Windows requires a writable handle to change file times.
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&sources.cam)
                     .unwrap()
                     .set_modified(stamp + std::time::Duration::from_secs(1))
                     .unwrap();
