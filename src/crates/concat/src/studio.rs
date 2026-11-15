@@ -1968,6 +1968,7 @@ fn command_kind(command: &Command) -> &'static str {
         Command::SetClipEnhanced { .. } => "Enhance off",
         Command::FreezeFrame { .. } => "Freeze frame",
         Command::MergeClips { .. } => "Merge",
+        Command::RepeatClips { .. } => "Repeat sequence",
         Command::ConsolidateClips { .. } => "Merge into one clip",
         Command::RemoveClips { ripple: true, .. } => "Ripple delete",
         Command::RemoveClips { .. } => "Delete",
@@ -2977,39 +2978,6 @@ fn match_command(source: &Clip, created: &str) -> Command {
     }
 }
 
-/// Where each held clip lands: `(row, start)` per clip in the order held,
-/// or `None` for one with no lane to land on. The group keeps its shape,
-/// every clip the same distance from the earliest as when copied, from
-/// `base` on; its rows are shifted by `shift` and held inside the `lanes`
-/// of the timeline it lands in, and a locked row is passed over for the
-/// nearest open one.
-fn paste_plan(
-    held: &[Held],
-    base: f64,
-    shift: isize,
-    lanes: usize,
-    locked: &dyn Fn(usize) -> bool,
-) -> Vec<Option<(usize, f64)>> {
-    let origin = held
-        .iter()
-        .map(|held| held.clip.start)
-        .fold(f64::INFINITY, f64::min);
-    let open: Vec<usize> = (0..lanes).filter(|row| !locked(*row)).collect();
-    held.iter()
-        .map(|held| {
-            let top = isize::try_from(lanes.checked_sub(1)?).ok()?;
-            let wanted = (isize::try_from(held.row).ok()? + shift).clamp(0, top);
-            let wanted = usize::try_from(wanted).ok()?;
-            let row = if locked(wanted) {
-                *open.iter().min_by_key(|row| row.abs_diff(wanted))?
-            } else {
-                wanted
-            };
-            Some((row, base + (held.clip.start - origin)))
-        })
-        .collect()
-}
-
 /// Each rewritten link as "Old → New", the new one by its package's name.
 fn upgraded_effects(pairs: &[(String, String)]) -> Vec<String> {
     let catalogue = Catalogue::builtin();
@@ -3444,51 +3412,6 @@ mod tests {
                 package.id()
             );
         }
-    }
-
-    /// A pasted group keeps its shape from `base` on, its rows shifted
-    /// and held inside the lanes it lands in, a locked row passed over
-    /// for the nearest open one; with no lane at all nothing lands.
-    #[test]
-    fn a_paste_keeps_the_groups_shape_and_lands_on_rows_that_exist() {
-        use concat_project::model::{Clip, ClipKind};
-        let held = |row: usize, start: f64| super::Held {
-            row,
-            clip: Clip::blank("c", "t", ClipKind::Video, "c", start, 1.0),
-            media: None,
-        };
-        let group = [held(1, 4.0), held(2, 5.5), held(0, 9.0)];
-        let none = |_: usize| false;
-        // At the playhead on the rows copied from.
-        let plan = super::paste_plan(&group, 10.0, 0, 4, &none);
-        assert_eq!(
-            plan,
-            vec![Some((1, 10.0)), Some((2, 11.5)), Some((0, 15.0))]
-        );
-        // After an anchor on row 3: the earliest lands there, the rest
-        // keep their distance in rows, held inside the four lanes.
-        let plan = super::paste_plan(&group, 20.0, 2, 4, &none);
-        assert_eq!(
-            plan,
-            vec![Some((3, 20.0)), Some((3, 21.5)), Some((2, 25.0))]
-        );
-        // Another timeline with two lanes: rows past the end fold back.
-        let plan = super::paste_plan(&group, 0.0, 0, 2, &none);
-        assert_eq!(plan, vec![Some((1, 0.0)), Some((1, 1.5)), Some((0, 5.0))]);
-        // A locked row is passed over for the nearest open one.
-        let plan = super::paste_plan(&group, 0.0, 0, 4, &|row| row == 1);
-        assert_eq!(plan, vec![Some((0, 0.0)), Some((2, 1.5)), Some((0, 5.0))]);
-        // No lanes, nothing lands; every lane locked, nothing lands.
-        assert!(
-            super::paste_plan(&group, 0.0, 0, 0, &none)
-                .iter()
-                .all(Option::is_none)
-        );
-        assert!(
-            super::paste_plan(&group, 0.0, 0, 2, &|_| true)
-                .iter()
-                .all(Option::is_none)
-        );
     }
 
     /// A detach that cannot happen has a reason to give, and a picture

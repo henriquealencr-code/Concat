@@ -529,47 +529,58 @@ impl Studio {
         self.clipboard = held;
     }
 
-    /// Paste: the held clips as a group, its shape kept, as one undo step.
-    /// After `after` and on its lane - the clip a menu was opened on, or
-    /// the one selected - with the rest of the group on the rows around it
-    /// as they were copied; or, with nothing to follow, at the playhead on
-    /// the rows they were copied from. In another timeline the rows are
-    /// matched by number, which is what a paste between timelines wanted
-    /// and never got: the held lane's id was the other timeline's, and the
-    /// add was refused without a word (#290). The new clips are selected.
+    /// Repeats a selected sequence as one undoable edit, on its own lane.
+    pub fn repeat_selected(&mut self, count: i32) {
+        if self
+            .selection
+            .iter()
+            .filter_map(|id| self.clip(id))
+            .any(|clip| self.locked(&clip.track_id))
+        {
+            self.notify(&t("studio.repeatTrackLocked"), true);
+            return;
+        }
+        self.flush_commit();
+        self.apply(Command::RepeatClips {
+            clip_ids: self.selection.clone(),
+            repetitions: count.max(0) as u32,
+        });
+    }
+
+    /// Paste after the anchor (or at the playhead), keeping every original
+    /// track by identity. Refuse unavailable tracks instead of moving clips.
     pub fn paste_clips(&mut self, after: Option<&str>) {
         if self.clipboard.is_empty() {
             return;
         }
         let held = self.clipboard.clone();
-        let first_row = held[0].row;
         let tracks: Vec<String> = self
             .timeline()
             .tracks
             .iter()
             .map(|track| track.id.clone())
             .collect();
-        let (base, shift) = match after.and_then(|id| self.clip(id).cloned()) {
-            Some(anchor) => {
-                let row = tracks
-                    .iter()
-                    .position(|id| *id == anchor.track_id)
-                    .unwrap_or(first_row);
-                let shift =
-                    isize::try_from(row).unwrap_or(0) - isize::try_from(first_row).unwrap_or(0);
-                (anchor.start + anchor.duration, shift)
-            }
-            None => (f64::from(self.playhead), 0),
+        let base = after
+            .and_then(|id| self.clip(id))
+            .map_or(f64::from(self.playhead), |anchor| {
+                anchor.start + anchor.duration
+            });
+        let clips: Vec<(&str, f64)> = held
+            .iter()
+            .map(|held| (held.clip.track_id.as_str(), held.clip.start))
+            .collect();
+        let track_ids: Vec<&str> = tracks.iter().map(String::as_str).collect();
+        let Some(plan) =
+            concat_project::placement::paste_on_original_tracks(&clips, &track_ids, base, &|row| {
+                self.locked(&tracks[row])
+            })
+        else {
+            self.notify(&t("studio.pasteOriginalTrackUnavailable"), true);
+            return;
         };
-        let plan = paste_plan(&held, base, shift, tracks.len(), &|row| {
-            tracks.get(row).is_some_and(|id| self.locked(id))
-        });
         self.flush_commit();
         let mut created = Vec::new();
-        for (held, place) in held.iter().zip(plan) {
-            let Some((row, start)) = place else {
-                continue;
-            };
+        for (held, (row, start)) in held.iter().zip(plan) {
             let Some(source) = self.held_here(held) else {
                 continue;
             };

@@ -5941,4 +5941,144 @@ mod tests {
             crate::delete_to_playhead(timeline, &gone, 5.0, PlayheadSide::Left, false).is_none()
         );
     }
+    fn loop_fixture() -> (Editor, String, String) {
+        let mut editor = Editor::new();
+        let media_id = editor
+            .apply(media("loop.mp4", 0.137, true))
+            .unwrap()
+            .created_id
+            .unwrap();
+        let track = editor.project().active().tracks[0].id.clone();
+        let clip = editor
+            .apply(Command::AddClip {
+                media_id,
+                track_id: track.clone(),
+                start: 0.0,
+                ripple: false,
+            })
+            .unwrap()
+            .created_id
+            .unwrap();
+        (editor, clip, track)
+    }
+
+    #[test]
+    fn long_loops_keep_the_original_track_and_exact_touching_boundaries() {
+        let (mut editor, id, track) = loop_fixture();
+        editor
+            .apply(Command::RepeatClips {
+                clip_ids: vec![id],
+                repetitions: 30_000,
+            })
+            .unwrap();
+        let clips = &editor.project().active().clips;
+        assert_eq!(clips.len(), 30_000);
+        assert!(clips.iter().all(|c| c.track_id == track));
+        assert!(
+            clips
+                .windows(2)
+                .all(|p| (p[0].start + p[0].duration - p[1].start).abs() < 1e-9)
+        );
+        let saved = editor.to_document(&settings());
+        assert_eq!(
+            Editor::from_document(&saved).unwrap().project(),
+            editor.project()
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.project().active().clips.len(), 1);
+        assert!(editor.redo());
+        assert_eq!(editor.project().active().clips.len(), 30_000);
+    }
+
+    #[test]
+    fn refused_loops_do_not_move_or_overwrite_existing_clips() {
+        let (mut editor, id, _) = loop_fixture();
+        let before = editor.project().clone();
+        for repetitions in [0, 1, 100_001] {
+            assert!(
+                editor
+                    .apply(Command::RepeatClips {
+                        clip_ids: vec![id.clone()],
+                        repetitions
+                    })
+                    .is_err()
+            );
+            assert_eq!(editor.project(), &before);
+        }
+        editor
+            .apply(Command::RepeatClips {
+                clip_ids: vec![id.clone()],
+                repetitions: 2,
+            })
+            .unwrap();
+        let before = editor.project().clone();
+        assert!(
+            editor
+                .apply(Command::RepeatClips {
+                    clip_ids: vec![id],
+                    repetitions: 3
+                })
+                .is_err()
+        );
+        assert_eq!(editor.project(), &before);
+    }
+    #[test]
+    fn sixty_fps_media_and_timeline_rate_undo_as_one_edit() {
+        let (mut editor, id, _) = loop_fixture();
+        let before = editor.project().clone();
+        let Command::AddMedia { mut item } = media("interpolated.mp4", 0.137, true) else {
+            panic!("media command")
+        };
+        item.frame_rate = Some(60.0);
+        let timeline_id = editor.project().active_timeline_id.clone();
+        let mut video = editor.project().active().video.clone();
+        video.rate_num = 60;
+        video.rate_den = 1;
+        editor
+            .apply(Command::Batch {
+                commands: vec![
+                    Command::ReplaceClipMedia {
+                        clip_id: id.clone(),
+                        item,
+                        source_start: None,
+                        enhanced: false,
+                        offset: 0.0,
+                    },
+                    Command::SetTimelineVideo { timeline_id, video },
+                ],
+            })
+            .unwrap();
+        assert_eq!(editor.project().active().video.rate_num, 60);
+        let clip = editor.project().active().clip(&id).unwrap();
+        assert_eq!(
+            editor.project().media_by_id(&clip.media_id).unwrap().path,
+            "interpolated.mp4"
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.project(), &before);
+        assert!(editor.redo());
+        assert_eq!(editor.project().active().video.rate_num, 60);
+    }
+    #[test]
+    fn loops_reject_excessive_metadata_before_changing_the_project() {
+        let (mut editor, id, _) = loop_fixture();
+        editor
+            .apply(Command::UpdateClip {
+                clip_id: id.clone(),
+                patch: crate::commands::ClipPatch {
+                    name: Some("x".repeat(100_000)),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let before = editor.project().clone();
+        let error = editor
+            .apply(Command::RepeatClips {
+                clip_ids: vec![id],
+                repetitions: 10_000,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("memory"));
+        assert_eq!(editor.project(), &before);
+    }
 }

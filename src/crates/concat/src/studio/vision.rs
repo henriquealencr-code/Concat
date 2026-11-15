@@ -5,6 +5,118 @@
 use super::*;
 
 impl Studio {
+    /// Cancels the active motion-interpolation job from the UI.
+    pub fn cancel_interpolation(&mut self) {
+        self.host.interpolators.cancel();
+    }
+
+    /// Builds a real 60 FPS copy off the UI thread and adopts only a complete
+    /// result whose source clip has not changed while the worker ran.
+    pub fn interpolate_clip(&mut self, id: &str) {
+        if self.host.interpolators.is_busy() {
+            self.notify(&t("studio.motionAlreadyRunning"), true);
+            return;
+        }
+        let Some(clip) = self.clip(id).cloned() else {
+            return;
+        };
+        if clip.kind != model::ClipKind::Video || self.locked(&clip.track_id) {
+            return;
+        }
+        if clip.speed != 1.0 || clip.speed_curve.is_some() {
+            self.notify(&t("studio.motionNeedsNormalSpeed"), true);
+            return;
+        }
+        let Some(media) = self.project().media_by_id(&clip.media_id).cloned() else {
+            return;
+        };
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Some(target) =
+            concat_host::interpolate::target_for(std::path::Path::new(session.path()), &media.path)
+        else {
+            return;
+        };
+        let job = match self.host.interpolators.reserve() {
+            Ok(job) => job,
+            Err(error) => {
+                self.notify(&tf("studio.motionFailed", &[&error]), true);
+                return;
+            }
+        };
+        let service = Arc::clone(&self.host.interpolators);
+        let epoch = crate::host::project_epoch();
+        on_ui_in_project(epoch, |_, window, _| {
+            use slint::ComponentHandle;
+            let editor = window.global::<Editor>();
+            editor.set_motion_progress(0.0);
+            editor.set_motion_open(true);
+        });
+        spawn_in_project(
+            move || {
+                let mut last = -1.0f32;
+                let result = service.convert_reserved(job, &media.path, &target, &mut |p| {
+                    if p - last >= 0.01 {
+                        last = p;
+                        on_ui_in_project(epoch, move |_, window, _| {
+                            use slint::ComponentHandle;
+                            window.global::<Editor>().set_motion_progress(p);
+                        });
+                    }
+                });
+                (clip, result)
+            },
+            |studio, window, _, (before, result)| {
+                use slint::ComponentHandle;
+                window.global::<Editor>().set_motion_open(false);
+                match result {
+                    Ok(path) => {
+                        let unchanged = studio.clip(&before.id).is_some_and(|now| {
+                            now.media_id == before.media_id
+                                && now.source_start == before.source_start
+                                && now.duration == before.duration
+                                && now.speed == before.speed
+                                && !studio.locked(&now.track_id)
+                        });
+                        if !unchanged {
+                            return;
+                        }
+                        match concat_host::media::probe(&path.to_string_lossy()) {
+                            Ok(summary) => {
+                                let mut item = summary.to_new_media();
+                                item.origin = Some(model::MediaOrigin::Processed);
+                                let timeline_id = studio.project().active_timeline_id.clone();
+                                let mut video = studio.timeline().video.clone();
+                                video.rate_num = 60;
+                                video.rate_den = 1;
+                                studio.apply(Command::Batch {
+                                    commands: vec![
+                                        Command::ReplaceClipMedia {
+                                            clip_id: before.id,
+                                            item,
+                                            source_start: None,
+                                            enhanced: false,
+                                            offset: 0.0,
+                                        },
+                                        Command::SetTimelineVideo { timeline_id, video },
+                                    ],
+                                });
+                                studio.request_preview();
+                                studio.notify(&t("studio.motionComplete"), false);
+                            }
+                            Err(error) => {
+                                studio.notify(&tf("studio.motionFailed", &[&error]), true)
+                            }
+                        }
+                    }
+                    Err(error) if error.contains("cancelled") => {}
+                    Err(error) => studio.notify(&tf("studio.motionFailed", &[&error]), true),
+                }
+            },
+        );
+    }
+
     // ── cutouts ──
     //
     // A cutout is a mask per source instant, found by the host's model and

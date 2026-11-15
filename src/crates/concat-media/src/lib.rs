@@ -20,6 +20,7 @@ pub mod error;
 mod feed;
 mod ffi;
 pub mod hardware;
+pub mod interpolate;
 pub mod peaks;
 pub mod pool;
 pub mod prefetch;

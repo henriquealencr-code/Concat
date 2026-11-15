@@ -1213,6 +1213,12 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
         let at = state.playhead;
         state.split_at(at, true);
     }));
+    editor.on_motion_cancel(on_window!(|state| {
+        state.cancel_interpolation();
+    }));
+    editor.on_repeat_clips(on_window!(|state, count: i32| {
+        state.repeat_selected(count);
+    }));
     editor.on_merge(on_window!(|state| {
         state.merge();
     }));

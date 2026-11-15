@@ -2725,3 +2725,360 @@ fn consolidation_keeps_the_global_frame_grid_at_fractional_starts() {
 
 #[path = "export/consolidate.rs"]
 mod consolidate;
+
+/// Real interpolation preserves duration/audio and writes 60 FPS without
+/// replacing the import. Motion synthesis itself is checked in concat-media.
+#[test]
+fn motion_sixty_preserves_video_duration_audio_and_source() {
+    let scratch = Scratch::new("motion-sixty");
+    let sources = Sources::make(scratch.path());
+    let original = std::fs::read(&sources.cam).unwrap();
+    let target = scratch.path().join("motion60.mp4");
+    let service = concat_host::interpolate::Interpolators::new();
+    let mut progressed = false;
+    service
+        .convert(sources.cam.to_str().unwrap(), &target, &mut |fraction| {
+            progressed |= fraction > 0.0;
+        })
+        .unwrap();
+    let result = Exported::read("motion60", &target, (60, 1));
+    assert_eq!(result.frames.len(), 240);
+    for second in 0..4 {
+        result.expect_second(f64::from(second) + 0.5, second);
+    }
+    result.expect_length(4.0);
+    result.expect_sound(4.0);
+    result.expect_tone(1.5);
+    assert_eq!(std::fs::read(&sources.cam).unwrap(), original);
+    assert_eq!(
+        concat_media::probe(&target)
+            .unwrap()
+            .video
+            .unwrap()
+            .frame_rate,
+        FrameRate::SIXTY
+    );
+    assert!(progressed);
+    assert!(!service.is_busy());
+}
+
+#[test]
+fn cancelled_motion_sixty_discards_partial_copy_and_keeps_the_import() {
+    let scratch = Scratch::new("motion-cancel");
+    let sources = Sources::make(scratch.path());
+    let original = std::fs::read(&sources.cam).unwrap();
+    let target = scratch.path().join("motion60.mp4");
+    let service = concat_host::interpolate::Interpolators::new();
+    let error = service
+        .convert(sources.cam.to_str().unwrap(), &target, &mut |f| {
+            if f > 0.02 {
+                service.cancel();
+            }
+        })
+        .unwrap_err();
+    assert!(error.contains("cancelled"), "{error}");
+    assert_eq!(std::fs::read(&sources.cam).unwrap(), original);
+    assert!(!target.exists());
+    assert!(!target.with_extension("motion.part.mp4").exists());
+    assert!(!target.with_extension("mux.part.mp4").exists());
+    assert!(!service.is_busy());
+}
+
+#[test]
+fn repeated_video_sequence_has_every_frame_at_every_join() {
+    let scratch = Scratch::new("loop-joins");
+    let sources = Sources::make(scratch.path());
+    let mut studio = Studio::new(scratch.path(), "Loop", video(WIDTH, HEIGHT, 60, 1));
+    let media = studio.import(&sources.cam);
+    let id = studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: media,
+            start: 0.0,
+        })
+        .unwrap();
+    studio.apply(Command::RepeatClips {
+        clip_ids: vec![id],
+        repetitions: 3,
+    });
+    let output = studio.exports.join("loop.mp4");
+    let request = export::request(
+        &studio.session,
+        &ExportSpec {
+            output: output.to_string_lossy().into_owned(),
+            ..Default::default()
+        },
+        Vec::new(),
+    );
+    export::run(&request, &AtomicBool::new(false), |_| {}).unwrap();
+    let result = Exported::read("loop", &output, (60, 1));
+    assert_eq!(result.frames.len(), 720);
+    for (i, frame) in result.frames.iter().enumerate() {
+        let rgb = frame.pixel(WIDTH / 2, HEIGHT / 2).unwrap();
+        assert_eq!(
+            second_of_colour([rgb[0], rgb[1], rgb[2]]),
+            Some(((i / 60) % 4) as u32),
+            "frame {i}"
+        );
+    }
+    result.expect_sound(12.0);
+    for t in [1.5, 3.5, 5.5, 7.5, 9.5, 11.5] {
+        result.expect_tone(t);
+    }
+}
+
+#[test]
+fn overlapping_music_tracks_sum_their_gains_and_mute_independently() {
+    let scratch = Scratch::new("music-tracks");
+    let sources = Sources::make(scratch.path());
+    let mut studio = Studio::new(scratch.path(), "Music", video(WIDTH, HEIGHT, 30, 1));
+    let media = studio.import(&sources.wav);
+    let first = studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: media.clone(),
+            start: 0.0,
+        })
+        .unwrap();
+    let second = studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: media,
+            start: 0.0,
+        })
+        .unwrap();
+    let first_track = studio
+        .project()
+        .active()
+        .clip(&first)
+        .unwrap()
+        .track_id
+        .clone();
+    let second_track = studio
+        .project()
+        .active()
+        .clip(&second)
+        .unwrap()
+        .track_id
+        .clone();
+    assert_ne!(first_track, second_track);
+    for (id, gain) in [(&first, 0.25), (&second, 0.75)] {
+        studio.apply(Command::UpdateClip {
+            clip_id: id.clone(),
+            patch: ClipPatch {
+                volume: Some(gain),
+                ..Default::default()
+            },
+        });
+    }
+    let rms = |out: &Exported| {
+        let samples = out.audio.as_ref().expect("audio");
+        let from = (1.3 * f64::from(RATE)) as usize * 2;
+        let to = from + RATE as usize / 10 * 2;
+        (samples[from..to]
+            .iter()
+            .map(|v| f64::from(*v).powi(2))
+            .sum::<f64>()
+            / (to - from) as f64)
+            .sqrt()
+    };
+    let full = studio.export("music-full");
+    let reference = rms(&full);
+    assert!(
+        (0.30..0.40).contains(&reference),
+        "two gains should sum without normalization: {reference}"
+    );
+    studio.apply(Command::UpdateClip {
+        clip_id: second,
+        patch: ClipPatch {
+            volume: Some(0.25),
+            ..Default::default()
+        },
+    });
+    let half = studio.export("music-half");
+    assert!((rms(&half) / reference - 0.5).abs() < 0.08);
+    studio.apply(Command::SetTrackFlag {
+        track_id: first_track,
+        flag: TrackFlag::Muted,
+        value: true,
+    });
+    let muted = studio.export("music-muted");
+    assert!((rms(&muted) / reference - 0.25).abs() < 0.06);
+}
+
+#[test]
+fn different_files_join_and_loop_without_black_or_shifted_frames() {
+    let scratch = Scratch::new("different-file-joins");
+    let sources = Sources::make(scratch.path());
+    let mut studio = Studio::new(scratch.path(), "Joined", video(WIDTH, HEIGHT, 60, 1));
+    let first_media = studio.import(&sources.cam);
+    let second_media = studio.import(&sources.silent);
+    let first = studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: first_media,
+            start: 0.0,
+        })
+        .unwrap();
+    let second = studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: second_media,
+            start: 4.0,
+        })
+        .unwrap();
+    assert_eq!(
+        studio.project().active().clip(&first).unwrap().track_id,
+        studio.project().active().clip(&second).unwrap().track_id
+    );
+    studio.apply(Command::RepeatClips {
+        clip_ids: vec![first, second],
+        repetitions: 2,
+    });
+    let output = studio.exports.join("joined-loop.mp4");
+    let request = export::request(
+        &studio.session,
+        &ExportSpec {
+            output: output.to_string_lossy().into_owned(),
+            ..Default::default()
+        },
+        Vec::new(),
+    );
+    export::run(&request, &AtomicBool::new(false), |_| {}).unwrap();
+    let result = Exported::read("joined-loop", &output, (60, 1));
+    assert_eq!(result.frames.len(), 840);
+    for (i, frame) in result.frames.iter().enumerate() {
+        let rgb = frame.pixel(WIDTH / 2, HEIGHT / 2).unwrap();
+        let phase = (i / 60) % 7;
+        let want = if phase < 4 { phase } else { phase - 4 };
+        assert_eq!(
+            second_of_colour([rgb[0], rgb[1], rgb[2]]),
+            Some(want as u32),
+            "frame {i}"
+        );
+    }
+    for t in [1.5, 3.5, 8.5, 10.5] {
+        result.expect_tone(t);
+    }
+    for t in [4.5, 6.5, 11.5, 13.5] {
+        result.expect_quiet(t);
+    }
+}
+
+#[test]
+fn source_modified_during_motion_conversion_does_not_land_a_stale_copy() {
+    let scratch = Scratch::new("motion-source-change");
+    let sources = Sources::make(scratch.path());
+    let original = std::fs::read(&sources.cam).unwrap();
+    let stamp = std::fs::metadata(&sources.cam).unwrap().modified().unwrap();
+    let target = scratch.path().join("motion60.mp4");
+    let service = concat_host::interpolate::Interpolators::new();
+    let mut touched = false;
+    let error = service
+        .convert(sources.cam.to_str().unwrap(), &target, &mut |fraction| {
+            if fraction > 0.02 && !touched {
+                std::fs::File::open(&sources.cam)
+                    .unwrap()
+                    .set_modified(stamp + std::time::Duration::from_secs(1))
+                    .unwrap();
+                touched = true;
+            }
+        })
+        .unwrap_err();
+    assert!(error.contains("source changed"), "{error}");
+    assert!(touched);
+    assert_eq!(std::fs::read(&sources.cam).unwrap(), original);
+    assert!(!target.exists());
+    assert!(!target.with_extension("motion.part.mp4").exists());
+}
+
+#[test]
+fn forward_reverse_loops_trim_duplicate_turnaround_frames() {
+    let scratch = Scratch::new("back-and-forth");
+    let sources = Sources::make(scratch.path());
+    let copy = scratch.path().join("reverse.mp4");
+    reverse::Reversers::new()
+        .reverse(
+            &reverse::ReverseRequest {
+                media_path: sources.cam.to_string_lossy().into_owned(),
+                audio_only: false,
+                start: 0.0,
+                duration: 4.0,
+                target: copy.clone(),
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+    let mut studio = Studio::new(
+        scratch.path(),
+        "Back and forth",
+        video(WIDTH, HEIGHT, 60, 1),
+    );
+    let media = studio.import(&sources.cam);
+    let first = studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: media,
+            start: 0.0,
+        })
+        .unwrap();
+    let media = studio.import(&copy);
+    let second = studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: media,
+            start: 4.0,
+        })
+        .unwrap();
+    let track = studio
+        .project()
+        .active()
+        .clip(&second)
+        .unwrap()
+        .track_id
+        .clone();
+    // The original already contains both endpoints. Remove them from the
+    // reversed leg so neither turn inserts a duplicated source frame.
+    studio.apply(Command::TrimClip {
+        clip_id: second.clone(),
+        edge: TrimEdge::Start,
+        delta: 1.0 / 30.0,
+        ripple: false,
+    });
+    studio.apply(Command::TrimClip {
+        clip_id: second.clone(),
+        edge: TrimEdge::End,
+        delta: -1.0 / 30.0,
+        ripple: false,
+    });
+    studio.apply(Command::MoveClips {
+        moves: vec![ClipMove {
+            clip_id: second.clone(),
+            track_id: track,
+            start: 4.0,
+        }],
+    });
+    studio.apply(Command::RepeatClips {
+        clip_ids: vec![first, second],
+        repetitions: 2,
+    });
+    let output = studio.exports.join("back-and-forth.mp4");
+    let request = export::request(
+        &studio.session,
+        &ExportSpec {
+            output: output.to_string_lossy().into_owned(),
+            ..Default::default()
+        },
+        Vec::new(),
+    );
+    export::run(&request, &AtomicBool::new(false), |_| {}).unwrap();
+    let result = Exported::read("back-and-forth", &output, (60, 1));
+    assert_eq!(result.frames.len(), 952);
+    for (i, frame) in result.frames.iter().enumerate() {
+        let at = i % 476;
+        let source_frame = if at < 240 {
+            at / 2
+        } else {
+            118 - (at - 240) / 2
+        };
+        let rgb = frame.pixel(WIDTH / 2, HEIGHT / 2).unwrap();
+        assert_eq!(
+            second_of_colour([rgb[0], rgb[1], rgb[2]]),
+            Some((source_frame / 30) as u32),
+            "frame {i}"
+        );
+    }
+}

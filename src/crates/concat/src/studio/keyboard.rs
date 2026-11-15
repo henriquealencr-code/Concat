@@ -3,6 +3,7 @@
 //! The keyboard, and the menu's verbs.
 
 use super::*;
+use slint::ComponentHandle;
 
 impl Studio {
     // ── the keyboard, and the menu's verbs ──
@@ -158,6 +159,15 @@ impl Studio {
         match action {
             "copy" => self.copy_clips(Some(id)),
             "duplicate" => self.duplicate_selected(),
+            "interpolate60" => self.interpolate_clip(id),
+            "repeat" => {
+                if !self.selection.iter().any(|held| held == id) {
+                    self.selection = vec![id.to_owned()];
+                }
+                crate::host::on_ui(|_, window, _| {
+                    window.global::<Editor>().set_repeat_open(true);
+                });
+            }
             // Pasted after the clip that was right-clicked, on its lane.
             "paste" => self.paste_clips(Some(id)),
             "split" => {

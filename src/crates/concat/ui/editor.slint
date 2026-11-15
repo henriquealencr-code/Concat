@@ -414,6 +414,11 @@ export global Editor {
     callback redo();
     callback split();
     callback merge();
+    in-out property <bool> repeat-open;
+    callback repeat-clips(count: int);
+    in-out property <bool> motion-open;
+    in-out property <float> motion-progress;
+    callback motion-cancel();
     callback delete-selected();
     /// The tray's tools for a clip's sound and words; each opens a sheet.
     /// Taking a clip's sound off its picture, and putting it back, are rows

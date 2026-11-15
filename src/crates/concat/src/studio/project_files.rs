@@ -361,6 +361,12 @@ impl Studio {
         self.host.stabilizers.cancel();
         self.host.enhancers.cancel();
         self.host.reversers.cancel();
+        self.host.interpolators.cancel();
+        crate::host::on_ui(|_, window, _| {
+            use slint::ComponentHandle;
+            window.global::<Editor>().set_motion_open(false);
+            window.global::<Editor>().set_repeat_open(false);
+        });
         self.enhance_jobs.clear();
         self.enhance_preview = None;
         self.enhance_previewing = None;

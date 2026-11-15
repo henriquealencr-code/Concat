@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer Abdullah
+
+import { I18n } from "../i18n.slint";
+import { Editor } from "../editor.slint";
+import { Theme } from "../theme/theme.slint";
+import { Glyph } from "../icons.slint";
+import { ActionPair, Field, Modal } from "../primitives/modal.slint";
+
+export component RepeatDialog inherits Modal {
+    property <string> count: "2";
+    property <bool> valid: root.count.is-float() && root.count.to-float() >= 2
+        && root.count.to-float() <= 100000
+        && Math.floor(root.count.to-float()) == root.count.to-float();
+    open: Editor.repeat-open;
+    title: I18n.t("studio.repeatClips");
+    glyph: Glyph.copy;
+    surface-width: 400px;
+    closed => { Editor.repeat-open = false; }
+    VerticalLayout {
+        padding: 16px;
+        spacing: 16px;
+        Text {
+            text: I18n.t("studio.repeatCountHint");
+            color: Theme.fg;
+            font-size: Theme.fs;
+            wrap: word-wrap;
+        }
+        Field {
+            value: root.count;
+            technical: true;
+            edited(value) => { root.count = value; }
+        }
+        ActionPair {
+            action-label: I18n.t("studio.repeatClips");
+            action-enabled: root.valid;
+            cancel => { Editor.repeat-open = false; }
+            act => {
+                if (root.valid) {
+                    Editor.repeat-clips(root.count.to-float());
+                    Editor.repeat-open = false;
+                }
+            }
+        }
+    }
+}

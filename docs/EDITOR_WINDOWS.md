@@ -7,7 +7,7 @@ registro distingue a primeira etapa implementada do editor final, ainda incomple
 ## Etapa 1: Enhance
 
 Foram encontrados caminhos concretos de falha, mas **o fechamento original não foi
-reproduzido no Windows**:
+reproduzido no Windows com a GPU do usuário**:
 
 - O compositor já força FXC porque o DXC encontrado no PATH pode carregar uma
   `dxcompiler.dll` incompatível e causar uma falha nativa. O upscaler usava a
@@ -84,32 +84,77 @@ executa inferência real e o teste de vídeo, compila o perfil `app` e reaprovei
 smokes/instaladores existentes. O modelo de teste fica no diretório temporário do
 runner, sem ser acrescentado ao pacote do aplicativo.
 
-**O workflow não foi executado no GitHub nesta tarefa; nenhum `.exe` foi produzido
-ou validado aqui.** Um runner hospedado também não substitui testes em máquinas
-Windows com GPUs Intel, NVIDIA e AMD, pouca VRAM, pouca RAM, modelo corrompido,
-rede interrompida, cancelamento e projetos não salvos. A janela não foi compilada
-nem testada nesta máquina Linux; o fluxo validado aqui é motor/CLI/API.
+A [execução Windows x64 #1](https://github.com/henriquealencr-code/Concat/actions/runs/43691660160)
+passou: regressões do Enhance (incluindo modelo real e UHD), compilação do aplicativo,
+smokes do pacote Windows, geração dos instaladores e upload do artefato
+`Concat-windows-x86_64`. O pacote contém o `.exe` de instalação e o `.msi`.
+Essa versão corresponde ao commit `cb63fccb`, anterior às novas funções abaixo.
+A compilação Rust da janela também passou neste Linux (`cargo check -p concat
+--lib --profile test`), além da compilação Slint dos novos diálogos.
 
-## Requisitos e etapas seguintes
+O runner não substitui testes em máquinas Windows com GPUs Intel, NVIDIA e AMD,
+pouca VRAM/RAM e projetos não salvos. O fechamento original do Enhance permanece
+sem reprodução/validação na máquina afetada. Os testes de modelo no runner não
+significam teste interativo do Enhance no executável com uma GPU física.
 
-| Requisito | Evidência/estado atual |
-| --- | --- |
-| Importar, salvar/abrir, undo/redo, várias faixas e volumes | Implementações existentes; regressões de projeto/motor passaram na preparação. Interface Windows ainda sem validação. |
-| Cortar, dividir, mover, duplicar, juntar | Implementações existentes; cortes fracionários e reversão foram verificados de ponta a ponta. Não representa validação de todos os gestos da interface. |
-| Copiar/colar na faixa original | Pendente: o paste atual pode deslocar as faixas para acompanhar o clipe usado como âncora e pode buscar faixa desbloqueada vizinha. Deve preservar a faixa ou recusar explicitamente, com regressões. |
-| Reversão e loops de ida e volta | Reversão existente e teste de trecho passou. Construção de loop/ida e volta e limites entre ciclos ainda pendentes. |
-| Loops contínuos de longa duração | Pendente: verificar continuidade quadro a quadro, áudio, limites de duração, uso de disco e memória. |
-| IA até 4K | Caminho implementado e testado na CPU Linux, incluindo quadro UHD e vídeo pequeno. Desempenho e estabilidade Windows/GPU pendentes. |
-| Interpolação real para 60 FPS | Não implementada. Selecionar exportação em 60 FPS não cria quadros intermediários por movimento. |
-| Múltiplas músicas e ajuste/sobreposição | Motor existente; regressões específicas de mixagem e testes da interface Windows ainda necessários. |
-| MP4 H.264/HEVC até 4K60 | Exportação existente; H.264 exercitado no vídeo aprimorado. HEVC/4K60 completos no Windows ainda sem validação. |
-| Progresso, cancelamento e recuperação | Tratamento do Enhance ampliado; cancelamento entre tiles testado no motor. Rede interrompida e pressão real de RAM/VRAM no Windows pendentes. |
-| Interface simples em pt-BR e remoção de funções extras | Tradução existente preservada e limite 4K atualizado. Simplificação/remoção de painéis, ferramentas e dependências não solicitados ainda não executada. |
-| Leveza e licenças | Nenhuma dependência de produção nova. Tamanho, consumo e desempenho do executável final ainda não medidos. Licenças e avisos originais preservados. |
+## Novas funções e uso
 
-Ordem de trabalho: concluir validação Windows do Enhance; corrigir semântica de
-colar e implementar loops com regressões; implementar interpolação real e validar
-4K60; restringir interface/dependências ao escopo pedido; executar regressão final,
-medir recursos e gerar o executável. Cada etapa deve manter os projetos existentes
-abrindo corretamente e preservar os arquivos originais. Não há autorização de
-escopo para acrescentar outros efeitos ou ferramentas.
+- **Colar na faixa original:** o destino é identificado pelo ID da faixa, não
+  pela posição visual. A âncora escolhe somente o tempo. Faixa removida ou
+  bloqueada recusa o grupo inteiro, sem colocá-lo numa vizinha. Dois testes
+  verificam reordenação, espaçamento, bloqueio e faixa inexistente.
+- **Repetir sequência:** selecione clipes contíguos numa mesma faixa, abra o menu
+  do clipe e escolha **Repetir sequência…**. Informe o total de ciclos, incluindo
+  o original. A operação conserva os arquivos e usa referências na linha do
+  tempo; recusa sobreposição, mais de 100 mil clipes, mais de 100 horas ou uma
+  estimativa excessiva de metadados. Undo/redo e salvar/abrir foram testados com
+  30 mil repetições. Fades e movimentos já existentes nos clipes são preservados.
+- **Ida e volta:** duplique o trecho, reverta a cópia e encoste os dois na mesma
+  faixa. Para não repetir as imagens das viradas, retire um quadro de cada ponta
+  do trecho revertido e volte a encostá-lo no original. Selecione o par e repita.
+  A regressão exercita esse fluxo e verifica os 952 quadros de duas voltas.
+  Não há detecção automática de que dois arquivos formam um par reverso.
+- **Interpolar para 60 FPS…:** no menu de um clipe de vídeo em velocidade normal,
+  gera uma cópia MP4 com compensação de movimento bidirecional (`minterpolate`,
+  modo MCI/AOBMC) do FFmpeg já vinculado ao programa. Não é mera duplicação ou
+  mistura de quadros. A troca da mídia e a mudança da linha do tempo para 60 FPS
+  são uma única etapa de desfazer. Há progresso, cancelamento, arquivos parciais,
+  verificação de memória e rejeição de origem modificada durante o trabalho.
+  Um teste de quadrado em movimento verifica posições intermediárias novas.
+  Testes de vídeo conferem 240 quadros em quatro segundos, áudio e original
+  intactos, cancelamento e mudança da origem. A conversão processa o arquivo
+  de mídia inteiro, mesmo quando o clipe está aparado; o in-point é preservado.
+- **Áudio em várias faixas:** o motor existente foi preservado. A regressão de
+  duas músicas sobrepostas mede a soma dos ganhos, redução de volume e mute de
+  uma faixa sem afetar a outra. Não foi acrescentada outra biblioteca de áudio.
+
+Limites atuais da interpolação: fonte SDR com uma faixa de áudio interna,
+velocidade normal sem curva, menos de 60 FPS, dimensões pares entre 16 pixels e
+UHD 4K. HDR/gamut amplo e múltiplos streams de áudio internos são recusados para
+não converter cores ou descartar áudio silenciosamente. Isso não limita a
+quantidade de músicas/faixas independentes da linha do tempo. Interpolação é
+executada na CPU; o encoder de vídeo tenta usar o hardware disponível. O modelo
+não garante movimentos sem artefatos: o resultado depende da cena.
+
+## Regressão e entrega
+
+As verificações locais incluem 256 testes de projeto, interpolação de movimento,
+vídeo/áudio/cancelamento, arquivos de origem modificados, loops longos e recusa de
+metadados excessivos, ida e volta, cortes fracionários e junções entre arquivos de
+FPS diferentes. Foram conferidos todos os 720 quadros de três repetições simples,
+os 840 quadros de uma sequência de dois arquivos repetida e os 952 da ida e volta.
+As fronteiras são verificadas sem quadros pretos nem deslocamento das imagens.
+Isso não equivale a medir a reprodução interativa em todos os computadores.
+
+O workflow Windows agora inclui essas regressões antes de compilar o pacote. O
+push na branch `work` inicia **Windows x64** automaticamente. Para baixar uma
+execução concluída, abra **Actions → Windows x64 → execução → Artifacts →
+Concat-windows-x86_64**, extraia o ZIP e execute o `*-setup.exe` ou use o `.msi`.
+A geração da versão com todas as novas funções ainda precisa ser confirmada na
+execução correspondente ao commit dessas alterações.
+
+Permanecem pendentes: validação interativa no Windows/GPU físico, medidas do
+pacote final e consumo em 4K60 de longa duração, casos VFR/HDR/multi-stream da
+interpolação e a remoção dos painéis/dependências antigos fora do escopo pedido.
+Nenhuma dependência de produção, ferramenta ou efeito não solicitado foi adicionado.
+O Enhance **não é considerado resolvido na máquina afetada**.

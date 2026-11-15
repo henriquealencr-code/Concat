@@ -2192,6 +2192,14 @@ impl Studio {
                 !locked,
             ),
             action(
+                "interpolate60",
+                t("studio.interpolateSixty"),
+                Glyph::Play,
+                "",
+                !locked && clip.kind == model::ClipKind::Video,
+            ),
+            action("repeat", t("studio.repeatClips"), Glyph::Copy, "", !locked),
+            action(
                 "paste",
                 t("studio.paste"),
                 Glyph::Plus,

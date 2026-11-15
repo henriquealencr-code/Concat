@@ -480,6 +480,25 @@ jobs:
           cargo test --locked -p concat-vision --features infer enhance::tests::a_real_model_outputs_3840_by_2160 -- --ignored --exact --nocapture
           cargo test --locked -p concat-host enhance::tests::a_real_video_is_enhanced_without_touching_the_source -- --ignored --exact --nocapture
 
+      - name: Editing regressions (Windows x64)
+        if: matrix.platform == 'windows'
+        timeout-minutes: 30
+        shell: bash
+        working-directory: src
+        run: |
+          set -euo pipefail
+          cargo test --locked -p concat-project
+          cargo test --locked -p concat-media interpolate::tests -- --nocapture
+          cargo test --locked -p concat-host interpolate::tests
+          cargo test --locked -p concat-host --test export motion_sixty -- --nocapture
+          cargo test --locked -p concat-host --test export source_modified_during_motion_conversion_does_not_land_a_stale_copy -- --exact --nocapture
+          cargo test --locked -p concat-host --test export cuts_between_frames_leave_no_black_frame -- --exact --nocapture
+          cargo test --locked -p concat-host --test export a_reversed_span_plays_its_seconds_backwards -- --exact --nocapture
+          cargo test --locked -p concat-host --test export repeated_video_sequence_has_every_frame_at_every_join -- --exact --nocapture
+          cargo test --locked -p concat-host --test export forward_reverse_loops_trim_duplicate_turnaround_frames -- --exact --nocapture
+          cargo test --locked -p concat-host --test export different_files_join_and_loop_without_black_or_shifted_frames -- --exact --nocapture
+          cargo test --locked -p concat-host --test export overlapping_music_tracks_sum_their_gains_and_mute_independently -- --exact --nocapture
+
       # The shipping profile: fat LTO, panic=abort, stripped. See the
       # workspace Cargo.toml for what each knob costs.
       #

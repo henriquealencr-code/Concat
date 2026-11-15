@@ -741,6 +741,15 @@ pub enum Command {
         #[serde(default)]
         still: Option<NewMedia>,
     },
+    /// Repeats a touching sequence on its original track without creating
+    /// rendered media or decoding frames into memory. `repetitions` includes
+    /// the original sequence. A forward/reversed pair forms an ida-e-volta loop.
+    RepeatClips {
+        /// Contiguous video/audio/image clips on one track, in any order.
+        clip_ids: Vec<String>,
+        /// Total cycles, from 2 to 100,000, within the document's time limit.
+        repetitions: u32,
+    },
     /// Rejoins split pieces into the earliest piece, which keeps its id.
     /// Errs with a user-facing sentence ([`why_not_merge`]) unless the
     /// pieces sit on one track, come from one file at one speed, touch
@@ -1042,6 +1051,12 @@ pub enum CommandError {
     #[error("{reason}")]
     CannotMerge {
         /// The [`why_not_merge`] sentence, verbatim.
+        reason: String,
+    },
+    /// A repeat would overlap existing work or exceed safe document limits.
+    #[error("{reason}")]
+    CannotRepeat {
+        /// The reason no clips were added.
         reason: String,
     },
     /// [`Command::RemoveTrack`] would have deleted the last track.
@@ -1384,6 +1399,7 @@ pub fn apply(
         | Command::ReplaceClipMedia { .. }
         | Command::SetClipEnhanced { .. }
         | Command::MergeClips { .. }
+        | Command::RepeatClips { .. }
         | Command::ConsolidateClips { .. }
         | Command::RemoveClips { .. }) => clips::apply(project, mint, command),
         command @ (Command::UpdateClip { .. }

@@ -194,3 +194,56 @@ impl Timeline {
         Some((before, after))
     }
 }
+
+/// Plans a paste on each clip's original track identity, even after tracks
+/// have been reordered. The anchor chooses time only. A missing or locked
+/// original track refuses the whole group rather than silently moving it.
+pub fn paste_on_original_tracks(
+    clips: &[(&str, f64)],
+    tracks: &[&str],
+    base: f64,
+    locked: &dyn Fn(usize) -> bool,
+) -> Option<Vec<(usize, f64)>> {
+    if !base.is_finite() || base < 0.0 || clips.iter().any(|(_, start)| !start.is_finite()) {
+        return None;
+    }
+    let origin = clips
+        .iter()
+        .map(|(_, start)| *start)
+        .fold(f64::INFINITY, f64::min);
+    clips
+        .iter()
+        .map(|(track, start)| {
+            let row = tracks.iter().position(|id| id == track)?;
+            if locked(row) {
+                return None;
+            }
+            let at = base + (start - origin);
+            at.is_finite().then_some((row, at))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod original_track_paste_tests {
+    use super::paste_on_original_tracks;
+
+    #[test]
+    fn anchor_time_does_not_change_original_tracks_or_group_spacing() {
+        let clips = [("video-1", 4.0), ("audio-1", 5.5), ("video-2", 9.0)];
+        let tracks = ["audio-1", "video-2", "video-1"];
+        assert_eq!(
+            paste_on_original_tracks(&clips, &tracks, 20.0, &|_| false),
+            Some(vec![(2, 20.0), (0, 21.5), (1, 25.0)])
+        );
+    }
+
+    #[test]
+    fn unavailable_original_track_refuses_the_whole_paste() {
+        let clips = [("a", 0.0), ("b", 1.0)];
+        assert!(paste_on_original_tracks(&clips, &["a"], 10.0, &|_| false).is_none());
+        assert!(paste_on_original_tracks(&clips, &["a", "b"], 10.0, &|row| row == 1).is_none());
+        assert!(paste_on_original_tracks(&clips, &["a", "b"], f64::NAN, &|_| false).is_none());
+        assert!(paste_on_original_tracks(&clips, &["a", "b"], -1.0, &|_| false).is_none());
+    }
+}

@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer Abdullah
+import { I18n } from "../i18n.slint";
+import { Editor } from "../editor.slint";
+import { Theme } from "../theme/theme.slint";
+import { Glyph } from "../icons.slint";
+import { Button, Modal, Progress } from "../primitives/modal.slint";
+
+export component MotionDialog inherits Modal {
+    open: Editor.motion-open;
+    title: I18n.t("studio.interpolateSixty");
+    glyph: Glyph.play;
+    surface-width: 400px;
+    closed => { Editor.motion-cancel(); Editor.motion-open = false; }
+    VerticalLayout {
+        padding: 16px;
+        spacing: 16px;
+        Text {
+            text: I18n.t("studio.motionWorking") + " " + Math.round(Editor.motion-progress * 100) + "%";
+            color: Theme.fg;
+            font-size: Theme.fs;
+            wrap: word-wrap;
+        }
+        Progress { value: Editor.motion-progress; live: true; height: 6px; }
+        Button {
+            label: I18n.t("common.cancel");
+            clicked => { Editor.motion-cancel(); Editor.motion-open = false; }
+        }
+    }
+}

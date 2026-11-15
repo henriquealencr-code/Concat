@@ -49,6 +49,8 @@ import {
     RelinkData,
     MissingMediaItem,
 } from "dialogs/relink.slint";
+import { MotionDialog } from "dialogs/motion.slint";
+import { RepeatDialog } from "dialogs/repeat.slint";
 import { ConfirmData, ConfirmDialog } from "dialogs/confirm.slint";
 import { CaptionsDialog, CaptionsSheetData } from "dialogs/captions.slint";
 import { SpeechDialog, SpeechSheetData } from "dialogs/speech.slint";
@@ -326,7 +328,7 @@ export component App inherits Window {
     /// then, and nothing that acts on what the sheet covers.
     property <bool> sheet-up: root.start.composing || root.export.open || root.settings.open
         || root.project-sheet.open || root.new-voice.open || root.relink.open
-        || root.confirm.open;
+        || root.confirm.open || Editor.repeat-open || Editor.motion-open;
     /// Which floating tool card is in front: "captions" or "speech". The
     /// one opened or grabbed last; Escape closes it first.
     property <string> front-tool: "captions";
@@ -664,6 +666,8 @@ export component App inherits Window {
             // finishes the activity, so Back with Export or a sheet open
             // quit the app, a running export with it.
             if (event.text == Key.Escape || event.text == Key.Back) {
+                if (Editor.motion-open) { Editor.motion-cancel(); Editor.motion-open = false; return accept; }
+                if (Editor.repeat-open) { Editor.repeat-open = false; return accept; }
                 if (root.confirm.open) { root.confirm-dismissed(); return accept; }
                 if (root.relink.open) { root.relink-dismiss(); return accept; }
                 if (root.new-voice.open) {
@@ -1161,6 +1165,20 @@ export component App inherits Window {
         data: root.confirm;
         confirmed => { root.confirm-accepted(); }
         dismissed => { root.confirm-dismissed(); }
+    }
+
+    MotionDialog {
+        x: 0;
+        y: root.sheets-top;
+        width: root.width;
+        height: root.height - root.sheets-top;
+    }
+
+    RepeatDialog {
+        x: 0;
+        y: root.sheets-top;
+        width: root.width;
+        height: root.height - root.sheets-top;
     }
 
     // Over everything but the tooltips and the menus, the sheets included:

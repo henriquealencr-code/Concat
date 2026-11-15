@@ -51,6 +51,7 @@ pub struct Host {
     /// The restoration model, and the enhanced copies it writes.
     pub enhancers: Arc<concat_host::Enhancers>,
     pub reversers: Arc<concat_host::Reversers>,
+    pub interpolators: Arc<concat_host::interpolate::Interpolators>,
     /// The Concat API on a socket, while the Automation page has it on. Its
     /// own sessions, apart from the window's: a caller edits projects of
     /// its own, never the one on screen, which `open_projects` keeps it
@@ -76,6 +77,7 @@ impl Host {
             brushes: Arc::new(concat_host::Brushes::new(&dirs.data)),
             enhancers: Arc::new(concat_host::Enhancers::new(&dirs.data)),
             reversers: Arc::new(concat_host::Reversers::new()),
+            interpolators: Arc::new(concat_host::interpolate::Interpolators::new()),
             dirs,
             playback: Playback::start(Arc::new(Events))?,
             monitor: match gpu {

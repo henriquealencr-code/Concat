@@ -718,6 +718,103 @@ pub(super) fn apply(
             })
         }
 
+        Command::RepeatClips {
+            clip_ids,
+            repetitions,
+        } => {
+            let refused = |reason: &str| CommandError::CannotRepeat {
+                reason: reason.to_owned(),
+            };
+            if !(2..=100_000).contains(&repetitions) || clip_ids.is_empty() {
+                return Err(refused(
+                    "Choose a sequence and between 2 and 100,000 repetitions.",
+                ));
+            }
+            let timeline = project.active_mut();
+            let mut selected: Vec<Clip> = clip_ids
+                .iter()
+                .map(|id| {
+                    timeline
+                        .clip(id)
+                        .cloned()
+                        .ok_or_else(|| refused("A selected clip no longer exists."))
+                })
+                .collect::<Result<_, _>>()?;
+            if selected.iter().map(|c| &c.id).collect::<HashSet<_>>().len() != selected.len() {
+                return Err(refused("A sequence cannot contain the same clip twice."));
+            }
+            selected.sort_by(|a, b| a.start.total_cmp(&b.start));
+            let first = &selected[0];
+            if selected.iter().any(|clip| {
+                clip.track_id != first.track_id
+                    || !matches!(
+                        clip.kind,
+                        ClipKind::Video | ClipKind::Audio | ClipKind::Image
+                    )
+            }) || selected.windows(2).any(|pair| {
+                (pair[0].start + pair[0].duration - pair[1].start).abs() > crate::placement::TOUCH
+            }) {
+                return Err(refused(
+                    "Select a touching video/audio sequence on one track.",
+                ));
+            }
+            let last = selected.last().expect("nonempty");
+            let end = last.start + last.duration;
+            let cycle = end - first.start;
+            let final_end = first.start + cycle * f64::from(repetitions);
+            let extra = selected
+                .len()
+                .checked_mul((repetitions - 1) as usize)
+                .ok_or_else(|| refused("Too many loop clips."))?;
+            if !final_end.is_finite()
+                || cycle <= 0.0
+                || final_end > crate::model::ranges::MAX_TIME
+                || timeline.clips.len().saturating_add(extra) > 100_000
+            {
+                return Err(refused(
+                    "The loop exceeds the timeline's duration or clip limit.",
+                ));
+            }
+            if !timeline.is_free(&first.track_id, end, final_end - end, &[]) {
+                return Err(refused(
+                    "The loop would overlap existing clips on its original track.",
+                ));
+            }
+            let cycle_bytes = selected
+                .iter()
+                .try_fold(0usize, |sum, clip| {
+                    serde_json::to_vec(clip).ok().and_then(|bytes| {
+                        sum.checked_add(std::mem::size_of::<Clip>() + bytes.len().saturating_mul(2))
+                    })
+                })
+                .ok_or_else(|| refused("Could not estimate loop memory."))?;
+            if cycle_bytes.saturating_mul((repetitions - 1) as usize) > 256 * 1024 * 1024 {
+                return Err(refused(
+                    "The loop would use too much memory; choose fewer repetitions.",
+                ));
+            }
+            // Reserve before touching the edit. Pixel data is never stored here.
+            timeline
+                .clips
+                .try_reserve(extra)
+                .map_err(|_| refused("Not enough memory for the loop."))?;
+            let mut created = None;
+            for repeat in 1..repetitions {
+                let base = first.start + cycle * f64::from(repeat);
+                for original in &selected {
+                    let mut clip = original.clone();
+                    clip.id = mint.next("c");
+                    clip.start = base + (original.start - first.start);
+                    created.get_or_insert_with(|| clip.id.clone());
+                    timeline.clips.push(Arc::new(clip));
+                }
+            }
+            Ok(Outcome {
+                created_id: created,
+                applied: true,
+            })
+        }
+
         Command::MergeClips { clip_ids } => {
             let timeline = project.active_mut();
             if let Some(reason) = why_not_merge(timeline, &clip_ids) {
