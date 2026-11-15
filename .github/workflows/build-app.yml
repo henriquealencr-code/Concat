@@ -525,6 +525,17 @@ jobs:
         shell: bash
         run: |
           if [ -f src/editing-regressions.log ]; then
+            python - <<'PYTHON'
+          from pathlib import Path
+          path = Path('src/editing-regressions.log')
+          with path.open('rb') as log:
+              log.seek(0, 2)
+              size = log.tell()
+              log.seek(max(0, size - 12000))
+              tail = log.read().decode('utf-8', errors='replace')
+          message = tail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print('::error title=Editing regression diagnostics::' + message)
+          PYTHON
             {
               echo "### Editing regression failure: ${{ matrix.target }}"
               echo '```'
